@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Environment / secrets
+.env
+*.env
+.env.*
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Audio / TTS cache
+/tmp/
+*.mp3
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
