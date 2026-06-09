@@ -28,3 +28,6 @@ build/
 # IDE
 .vscode/
 .idea/
+
+# Swiggy MCP OAuth tokens (secrets — never commit)
+.swiggy_tokens.json

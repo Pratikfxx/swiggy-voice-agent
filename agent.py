@@ -2,7 +2,7 @@
 Swiggy Voice Agent — Core Claude Agent
 
 Handles multi-turn conversations across voice and chat surfaces.
-Uses Claude claude-sonnet-4-6 with tool use for all Swiggy operations.
+Uses Claude with tool-calling for demo mode and Anthropic MCP connectors for live mode.
 
 Surface modes:
   - "voice": concise responses, max 3 items, spoken naturally
@@ -11,12 +11,14 @@ Surface modes:
 
 import json
 import os
-from typing import Optional
+import re
+import logging
+
 import anthropic
-from dotenv import load_dotenv
 
 from recipe_engine import get_recipe_ingredients as _get_recipe_ingredients
 from order_history import save_order, get_recent_orders
+from swiggy_auth import get_all_access_tokens
 from swiggy_tools import (
     get_saved_address,
     search_food_restaurants,
@@ -29,8 +31,33 @@ from swiggy_tools import (
     book_dineout_table_mock,
 )
 
-load_dotenv()
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+AGENT_MODEL = os.getenv("AGENT_MODEL", "claude-haiku-4-5")
+DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() == "true"
+CONFIRM_RE = re.compile(
+    r"\b(yes|yeah|yep|yup|haan|haa|ha|confirm(ed)?|theek hai|thik hai|place (it|the order)|order it|book it|go ahead|pakka|kar do|kardo|do it|sure|okay|ok|proceed)\b",
+    re.I,
+)
+
+SWIGGY_SERVERS = {
+    "swiggy-food": "https://mcp.swiggy.com/food",
+    "swiggy-instamart": "https://mcp.swiggy.com/im",
+    "swiggy-dineout": "https://mcp.swiggy.com/dineout",
+}
+MCP_AUTH_KEYS = {
+    "swiggy-food": "food",
+    "swiggy-instamart": "im",
+    "swiggy-dineout": "dineout",
+}
+SPEND_TOOLS = {
+    "swiggy-food": ["place_food_order"],
+    "swiggy-instamart": ["checkout"],
+    "swiggy-dineout": ["book_table"],
+}
+
+
+def _is_confirmation(text):
+    return bool(CONFIRM_RE.search(text or ""))
 
 # ─────────────────────────────────────────────
 # Tool definitions — Claude sees these
@@ -245,6 +272,12 @@ TOOLS = [
     }
 ]
 
+LIVE_LOCAL_TOOLS = [
+    tool for tool in TOOLS
+    if tool["name"] in {"get_recipe_ingredients", "get_order_history"}
+]
+LOCAL_NAMES = {tool["name"] for tool in LIVE_LOCAL_TOOLS}
+
 
 # ─────────────────────────────────────────────
 # Tool executor — maps tool names → functions
@@ -438,10 +471,276 @@ Show a cart summary table, total, ETA, then ask for confirmation.
 Respond in the same language the user writes in (English or Hindi).
 """
 
+LIVE_SYSTEM_SUFFIX = """
+
+## LIVE Swiggy mode
+You now have LIVE Swiggy tools across Food, Instamart, and Dineout. These tools use the user's real Swiggy account and can spend real money or commit a real booking.
+
+Hard safety rule: NEVER call place_food_order, checkout, or book_table unless the user has EXPLICITLY confirmed in their most recent message (yes/haan/confirm/etc). If they have not confirmed, summarize and ask for confirmation instead.
+
+When fetching addresses, default to the address tagged Home or the most recently used; confirm the delivery address in one short line before placing.
+"""
+
+
+def _block_value(block, key, default=None):
+    if isinstance(block, dict):
+        return block.get(key, default)
+    return getattr(block, key, default)
+
+
+def _content_text(content) -> str:
+    if isinstance(content, str):
+        return content.strip()
+
+    text_blocks = []
+    for block in content or []:
+        text = _block_value(block, "text")
+        if text:
+            text_blocks.append(text)
+    return " ".join(text_blocks).strip()
+
+
+def _spend_server_for_tool(tool_name: str) -> str:
+    for server_name, tool_names in SPEND_TOOLS.items():
+        if tool_name in tool_names:
+            return server_name
+    return ""
+
+
+def _live_order_summary(tool_name: str, tool_input: dict) -> tuple[str, str, list, str, float]:
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+
+    server_name = _spend_server_for_tool(tool_name)
+    order_type = {
+        "swiggy-food": "food",
+        "swiggy-instamart": "grocery",
+        "swiggy-dineout": "dineout",
+    }.get(server_name, "food")
+
+    items = tool_input.get("items") or tool_input.get("cart_items") or []
+    if not isinstance(items, list):
+        items = []
+
+    restaurant_name = (
+        tool_input.get("restaurant_name")
+        or tool_input.get("restaurantName")
+        or tool_input.get("name")
+        or ""
+    )
+    total_amount = (
+        tool_input.get("total_amount")
+        or tool_input.get("totalAmount")
+        or tool_input.get("amount")
+        or 0
+    )
+
+    if tool_name == "place_food_order":
+        item_names = [str(item.get("name", "")) for item in items if isinstance(item, dict)]
+        summary = ", ".join([name for name in item_names if name][:3])
+        if restaurant_name:
+            summary = f"{summary} from {restaurant_name}" if summary else f"Food from {restaurant_name}"
+        summary = summary or "Live food order"
+    elif tool_name == "checkout":
+        item_names = [str(item.get("name", "")) for item in items if isinstance(item, dict)]
+        summary = "Groceries"
+        if item_names:
+            summary = f"Groceries: {', '.join(item_names[:4])}"
+            if len(item_names) > 4:
+                summary += " & more"
+    elif tool_name == "book_table":
+        guests = tool_input.get("guests") or tool_input.get("party_size") or tool_input.get("partySize")
+        slot_time = tool_input.get("slot_time") or tool_input.get("slotTime") or tool_input.get("time")
+        summary = "Dineout table booking"
+        if restaurant_name:
+            summary = f"Table at {restaurant_name}"
+        if guests:
+            summary += f" for {guests}"
+        if slot_time:
+            summary += f" @ {slot_time}"
+    else:
+        summary = f"{tool_name}: {json.dumps(tool_input, default=str)[:160]}"
+
+    try:
+        total_amount = float(total_amount)
+    except (TypeError, ValueError):
+        total_amount = 0.0
+
+    return order_type, summary, items, restaurant_name, total_amount
+
+
+def _save_live_order_if_any(content_blocks: list, session_id: str) -> None:
+    if not session_id:
+        return
+
+    pending_spend_tools = {}
+    last_pending_spend_tool = None
+    for block in content_blocks:
+        block_type = _block_value(block, "type")
+        if block_type == "mcp_tool_use":
+            tool_name = _block_value(block, "name", "")
+            if not _spend_server_for_tool(tool_name):
+                continue
+            tool_id = _block_value(block, "id")
+            if tool_id:
+                pending_spend_tools[tool_id] = block
+            last_pending_spend_tool = block
+        elif block_type == "mcp_tool_result":
+            tool_use_id = _block_value(block, "tool_use_id")
+            tool_use = pending_spend_tools.get(tool_use_id) or last_pending_spend_tool
+            if not tool_use or _block_value(block, "is_error", False):
+                continue
+
+            try:
+                order_type, summary, items, restaurant_name, total_amount = _live_order_summary(
+                    _block_value(tool_use, "name", ""),
+                    _block_value(tool_use, "input", {}),
+                )
+                save_order(
+                    session_id=session_id,
+                    order_type=order_type,
+                    summary=summary,
+                    items=items,
+                    restaurant_name=restaurant_name,
+                    total_amount=total_amount,
+                )
+            except Exception:
+                logging.exception("Failed to save live Swiggy order history")
+            return
+
 
 # ─────────────────────────────────────────────
 # Main agent runner
 # ─────────────────────────────────────────────
+
+def _run_agent_demo(
+    user_message: str,
+    conversation_history: list[dict],
+    surface: str = "voice",
+    session_id: str = ""
+) -> tuple[str, list[dict]]:
+    system_prompt = VOICE_SYSTEM_PROMPT if surface == "voice" else CHAT_SYSTEM_PROMPT
+    messages = conversation_history + [{"role": "user", "content": user_message}]
+
+    for _ in range(8):
+        response = client.messages.create(
+            model=AGENT_MODEL,
+            max_tokens=1024,
+            system=system_prompt,
+            tools=TOOLS,
+            messages=messages,
+        )
+        text_blocks = [b.text for b in response.content if hasattr(b, "text")]
+        tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+        messages.append({"role": "assistant", "content": response.content})
+
+        if response.stop_reason == "end_turn" or not tool_use_blocks:
+            return " ".join(text_blocks).strip(), messages
+
+        tool_results = [
+            {
+                "type": "tool_result",
+                "tool_use_id": tu.id,
+                "content": execute_tool(tu.name, tu.input, session_id=session_id),
+            }
+            for tu in tool_use_blocks
+        ]
+        messages.append({"role": "user", "content": tool_results})
+
+    return "Sorry, something went wrong. Please try again.", messages
+
+
+def _run_agent_live(
+    user_message: str,
+    conversation_history: list[dict],
+    surface: str,
+    session_id: str,
+    tokens: dict[str, str],
+) -> tuple[str, list[dict]]:
+    messages = conversation_history + [{"role": "user", "content": user_message}]
+
+    try:
+        system_prompt = (
+            VOICE_SYSTEM_PROMPT if surface == "voice" else CHAT_SYSTEM_PROMPT
+        ) + LIVE_SYSTEM_SUFFIX
+        confirmed = _is_confirmation(user_message)
+        mcp_servers = [
+            {
+                "type": "url",
+                "url": url,
+                "name": name,
+                "authorization_token": tokens[MCP_AUTH_KEYS[name]],
+            }
+            for name, url in SWIGGY_SERVERS.items()
+        ]
+        tools = [
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": name,
+                "default_config": {"enabled": True},
+                "configs": {
+                    tool: {"enabled": confirmed}
+                    for tool in SPEND_TOOLS[name]
+                },
+            }
+            for name in SWIGGY_SERVERS
+        ]
+        tools.extend(LIVE_LOCAL_TOOLS)
+
+        for _ in range(8):
+            response = client.beta.messages.create(
+                model=AGENT_MODEL,
+                max_tokens=1024,
+                system=system_prompt,
+                tools=tools,
+                mcp_servers=mcp_servers,
+                betas=["mcp-client-2025-11-20"],
+                messages=messages,
+            )
+            messages.append({"role": "assistant", "content": response.content})
+
+            if response.stop_reason == "pause_turn":
+                continue
+
+            local_tool_uses = [
+                b for b in response.content
+                if getattr(b, "type", None) == "tool_use"
+            ]
+            if not local_tool_uses:
+                break
+
+            tool_results = [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": b.id,
+                    "content": execute_tool(b.name, b.input, session_id=session_id),
+                }
+                for b in local_tool_uses
+            ]
+            messages.append({"role": "user", "content": tool_results})
+
+        assistant_blocks = []
+        for message in messages:
+            if message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                continue
+            assistant_blocks.extend(content or [])
+        _save_live_order_if_any(assistant_blocks, session_id)
+
+        final_text = ""
+        for message in reversed(messages):
+            if message.get("role") == "assistant":
+                final_text = _content_text(message.get("content"))
+                break
+
+        return final_text or "Done. Please check Swiggy for the latest status.", messages
+
+    except Exception:
+        logging.exception("Swiggy live agent failed")
+        return "Sorry, I hit a problem reaching Swiggy. Please try again in a moment.", messages
+
 
 def run_agent(
     user_message: str,
@@ -460,54 +759,16 @@ def run_agent(
     Returns:
         (agent_response_text, updated_conversation_history)
     """
-    system_prompt = VOICE_SYSTEM_PROMPT if surface == "voice" else CHAT_SYSTEM_PROMPT
+    if DEMO_MODE:
+        return _run_agent_demo(user_message, conversation_history, surface, session_id)
 
-    # Add user message to history
-    messages = conversation_history + [
-        {"role": "user", "content": user_message}
-    ]
+    try:
+        tokens = get_all_access_tokens()
+    except Exception as e:
+        logging.warning("Swiggy not authed, falling back to demo: %s", e)
+        return _run_agent_demo(user_message, conversation_history, surface, session_id)
 
-    max_tool_rounds = 8  # prevent infinite loops
-    round_count = 0
-
-    while round_count < max_tool_rounds:
-        round_count += 1
-
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            system=system_prompt,
-            tools=TOOLS,
-            messages=messages
-        )
-
-        # Collect text from response
-        text_blocks = [b.text for b in response.content if hasattr(b, "text")]
-        tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
-
-        # Add assistant turn to history
-        messages.append({"role": "assistant", "content": response.content})
-
-        # If no tool calls, we have a final answer
-        if response.stop_reason == "end_turn" or not tool_use_blocks:
-            final_text = " ".join(text_blocks).strip()
-            return final_text, messages
-
-        # Execute all tool calls in parallel-ish (sequential here, fast enough)
-        tool_results = []
-        for tool_use in tool_use_blocks:
-            result_str = execute_tool(tool_use.name, tool_use.input, session_id=session_id)
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": tool_use.id,
-                "content": result_str
-            })
-
-        # Add tool results as user turn
-        messages.append({"role": "user", "content": tool_results})
-
-    # Fallback if max rounds hit
-    return "Sorry, something went wrong. Please try again.", messages
+    return _run_agent_live(user_message, conversation_history, surface, session_id, tokens)
 
 
 # ─────────────────────────────────────────────
