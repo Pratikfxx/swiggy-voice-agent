@@ -198,7 +198,7 @@ async def voice_answer(request: Request):
     form = await request.form()
     call_sid = form.get("CallSid", "unknown")
 
-    greeting = "Hi, Swiggy here! What would you like to order?"
+    greeting = "Hi, Welcome to Swiggy! What would you like to order?"
 
     twiml = await make_twiml_response(greeting, session_id=call_sid)
     return Response(content=twiml, media_type="application/xml")

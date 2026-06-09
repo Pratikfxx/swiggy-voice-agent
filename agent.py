@@ -32,8 +32,8 @@ from swiggy_tools import (
 )
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-AGENT_MODEL = os.getenv("AGENT_MODEL", "claude-haiku-4-5")
-DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() == "true"
+AGENT_MODEL = os.getenv("AGENT_MODEL", "claude-sonnet-4-6")
+DEMO_MODE = os.getenv("DEMO_MODE", "flase").lower() == "true"
 CONFIRM_RE = re.compile(
     r"\b(yes|yeah|yep|yup|haan|haa|ha|confirm(ed)?|theek hai|thik hai|place (it|the order)|order it|book it|go ahead|pakka|kar do|kardo|do it|sure|okay|ok|proceed)\b",
     re.I,
