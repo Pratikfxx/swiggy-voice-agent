@@ -11,12 +11,14 @@ Routes:
   GET  /                  — Demo info page
 """
 
+import logging
 import os
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from dotenv import load_dotenv
 
+import swiggy_address
 from voice_handler import router as voice_router
 from whatsapp_handler import router as whatsapp_router
 
@@ -30,6 +32,14 @@ app = FastAPI(
 
 app.include_router(voice_router)
 app.include_router(whatsapp_router)
+
+
+@app.on_event("startup")
+async def _warm():
+    try:
+        await swiggy_address.refresh_default_address()
+    except Exception:
+        logging.exception("startup address warm failed")
 
 
 @app.get("/health")

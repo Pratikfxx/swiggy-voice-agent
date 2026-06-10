@@ -18,6 +18,7 @@ import anthropic
 
 from recipe_engine import get_recipe_ingredients as _get_recipe_ingredients
 from order_history import save_order, get_recent_orders
+import swiggy_address
 from swiggy_auth import get_all_access_tokens
 from swiggy_tools import (
     get_saved_address,
@@ -691,10 +692,23 @@ def _run_agent_live(
         system_prompt = (
             VOICE_SYSTEM_PROMPT if surface == "voice" else CHAT_SYSTEM_PROMPT
         ) + LIVE_SYSTEM_SUFFIX
-        if DEFAULT_ADDRESS_ID:
+        swiggy_address.maybe_background_refresh()
+        default_address = swiggy_address.get_cached_default()
+        if default_address:
+            addr_id = default_address["id"]
+            addr_label = default_address["label"]
+            addr_area = default_address.get("area", "")
+        elif DEFAULT_ADDRESS_ID:
+            addr_id = DEFAULT_ADDRESS_ID
+            addr_label = DEFAULT_ADDRESS_LABEL
+            addr_area = DEFAULT_ADDRESS_AREA
+        else:
+            addr_id = ""
+
+        if addr_id:
             system_prompt += (
-                f"\n\nDEFAULT DELIVERY ADDRESS: {DEFAULT_ADDRESS_LABEL} ({DEFAULT_ADDRESS_AREA}), "
-                f"addressId {DEFAULT_ADDRESS_ID}. Use this addressId directly for all orders. "
+                f"\n\nDEFAULT DELIVERY ADDRESS: {addr_label} ({addr_area}), "
+                f"addressId {addr_id}. Use this addressId directly for all orders. "
                 "Do NOT call get_addresses at all unless the user explicitly asks to change, "
                 "list, or pick a different address."
             )
