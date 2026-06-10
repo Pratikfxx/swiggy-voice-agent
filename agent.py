@@ -35,7 +35,7 @@ from swiggy_tools import (
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 AGENT_MODEL = os.getenv("AGENT_MODEL", "claude-sonnet-4-6")
 VOICE_MODEL = os.getenv("VOICE_MODEL", "claude-haiku-4-5")
-DEMO_MODE = os.getenv("DEMO_MODE", "flase").lower() == "true"
+DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 DEFAULT_ADDRESS_ID = os.getenv("DEFAULT_ADDRESS_ID", "")
 DEFAULT_ADDRESS_LABEL = os.getenv("DEFAULT_ADDRESS_LABEL", "Home")
 DEFAULT_ADDRESS_AREA = os.getenv("DEFAULT_ADDRESS_AREA", "")

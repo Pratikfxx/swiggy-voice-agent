@@ -52,6 +52,12 @@ router = APIRouter(prefix="/voice", tags=["voice"])
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 
+# Circuit breaker — skip ElevenLabs after repeated 4xx failures
+_el_failures = 0
+_el_disabled_until = 0.0
+_EL_MAX_FAILURES = 3
+_EL_BACKOFF_SECS = 300
+
 
 def get_base_url() -> str:
     """Return BASE_URL env var — set by Railway in prod, or by start.sh locally."""
@@ -73,7 +79,10 @@ async def generate_tts_audio(text: str) -> Optional[str]:
     - Removed invalid 'speed' from voice_settings (not a valid field).
     - Updated to eleven_turbo_v2_5 for lower latency.
     """
+    global _el_failures, _el_disabled_until
     if not ELEVENLABS_API_KEY:
+        return None
+    if _el_failures >= _EL_MAX_FAILURES and time.time() < _el_disabled_until:
         return None
 
     cache_key = hashlib.md5(text.encode()).hexdigest()
@@ -98,6 +107,7 @@ async def generate_tts_audio(text: str) -> Optional[str]:
                 }
             )
         if response.status_code == 200:
+            _el_failures = 0
             audio_path = f"/tmp/tts_{cache_key}.mp3"
             with open(audio_path, "wb") as f:
                 f.write(response.content)
@@ -106,6 +116,10 @@ async def generate_tts_audio(text: str) -> Optional[str]:
             return url
         else:
             print(f"ElevenLabs TTS error {response.status_code}: {response.text[:200]}")
+            _el_failures += 1
+            if _el_failures >= _EL_MAX_FAILURES:
+                _el_disabled_until = time.time() + _EL_BACKOFF_SECS
+                logging.warning("ElevenLabs circuit open for %ds (failure #%d)", _EL_BACKOFF_SECS, _el_failures)
     except Exception as e:
         print(f"ElevenLabs TTS exception: {e}")
     return None
