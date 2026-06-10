@@ -11,8 +11,10 @@ ElevenLabs TTS generates natural-sounding audio for each agent response.
 Falls back to Twilio <Say> if ElevenLabs key not set.
 """
 
+import logging
 import os
 import re
+import time
 import hashlib
 import httpx
 from typing import Optional
@@ -22,6 +24,9 @@ from twilio.twiml.voice_response import VoiceResponse, Gather, Say, Play, Hangup
 from dotenv import load_dotenv
 
 from agent import process_message, clear_session
+
+
+_FAREWELL_RE = re.compile(r"\b(bye|goodbye|good bye|cancel|hang up|end call|band karo|band kar do|stop)\b", re.I)
 
 
 def clean_for_voice(text: str) -> str:
@@ -158,8 +163,7 @@ async def make_twiml_response(
 
 def is_farewell(text: str) -> bool:
     """Detect if user wants to end the call."""
-    farewells = ["bye", "goodbye", "cancel", "nevermind", "nothing", "hang up", "end call", "band kar"]
-    return any(f in text.lower() for f in farewells)
+    return bool(_FAREWELL_RE.search(text or ""))
 
 
 def is_order_complete(response_text: str) -> bool:
@@ -214,6 +218,7 @@ async def voice_process(request: Request):
     call_sid = form.get("CallSid", "unknown")
     speech_result = form.get("SpeechResult", "")
     confidence = float(form.get("Confidence", 0))
+    logging.info("VOICE in call=%s speech=%r", call_sid, speech_result)
 
     # NOTE: Confidence check removed — Twilio returns 0.0 for short but valid
     # utterances like "yes", "haan", "okay", which breaks the confirmation flow.
@@ -236,11 +241,14 @@ async def voice_process(request: Request):
         return Response(content=twiml, media_type="application/xml")
 
     # Run agent
+    start = time.monotonic()
     agent_response = process_message(
         session_id=call_sid,
         user_message=speech_result,
         surface="voice"
     )
+    elapsed = time.monotonic() - start
+    logging.info("VOICE out call=%s elapsed=%.1fs reply=%r", call_sid, elapsed, agent_response)
 
     # Check if order is complete → hang up after speaking
     final = is_order_complete(agent_response)

@@ -33,7 +33,11 @@ from swiggy_tools import (
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 AGENT_MODEL = os.getenv("AGENT_MODEL", "claude-sonnet-4-6")
+VOICE_MODEL = os.getenv("VOICE_MODEL", "claude-haiku-4-5")
 DEMO_MODE = os.getenv("DEMO_MODE", "flase").lower() == "true"
+DEFAULT_ADDRESS_ID = os.getenv("DEFAULT_ADDRESS_ID", "")
+DEFAULT_ADDRESS_LABEL = os.getenv("DEFAULT_ADDRESS_LABEL", "Home")
+DEFAULT_ADDRESS_AREA = os.getenv("DEFAULT_ADDRESS_AREA", "")
 CONFIRM_RE = re.compile(
     r"\b(yes|yeah|yep|yup|haan|haa|ha|confirm(ed)?|theek hai|thik hai|place (it|the order)|order it|book it|go ahead|pakka|kar do|kardo|do it|sure|okay|ok|proceed)\b",
     re.I,
@@ -54,6 +58,20 @@ SPEND_TOOLS = {
     "swiggy-instamart": ["checkout"],
     "swiggy-dineout": ["book_table"],
 }
+
+
+def _route_servers(user_message: str, surface: str) -> list[str]:
+    """Return which SWIGGY_SERVERS names to attach. For voice, narrow to 1 server to stay under Twilio timeout; for chat, attach all three."""
+    if surface != "voice":
+        return list(SWIGGY_SERVERS.keys())
+    m = (user_message or "").lower()
+    dineout_kw = ("book a table", "table for", "reserve", "reservation", "dine out", "dineout", "booking", "sit down", "table at")
+    grocery_kw = ("grocery", "groceries", "instamart", "gatorade", "milk", "egg", "bread", "water", "juice", "soda", "cola", "snack", "chips", "biscuit", "vegetable", "veggie", "fruit", "atta", "rice", "oil", "sugar", "salt", "detergent", "soap", "shampoo", "curd", "paneer", "butter", "cheese", "chocolate", "ice cream", "maggi", "coffee", "tea")
+    if any(k in m for k in dineout_kw):
+        return ["swiggy-dineout"]
+    if any(k in m for k in grocery_kw):
+        return ["swiggy-instamart"]
+    return ["swiggy-food"]
 
 
 def _is_confirmation(text):
@@ -479,6 +497,8 @@ You now have LIVE Swiggy tools across Food, Instamart, and Dineout. These tools 
 Hard safety rule: NEVER call place_food_order, checkout, or book_table unless the user has EXPLICITLY confirmed in their most recent message (yes/haan/confirm/etc). If they have not confirmed, summarize and ask for confirmation instead.
 
 When fetching addresses, default to the address tagged Home or the most recently used; confirm the delivery address in one short line before placing.
+
+ADDRESS & SPEED RULES: Do NOT call get_addresses just to search - searching for food or products needs no address, so search immediately. Only resolve a delivery address when actually placing an order, and then default to the user's Home address (or most recently used) automatically. NEVER ask the user to choose an address unless they explicitly bring it up. On voice especially, keep it to one short question max before proposing an item.
 """
 
 
@@ -505,6 +525,14 @@ def _spend_server_for_tool(tool_name: str) -> str:
         if tool_name in tool_names:
             return server_name
     return ""
+
+
+def _model_for(surface):
+    return VOICE_MODEL if surface == "voice" else AGENT_MODEL
+
+
+def _max_tokens_for(surface):
+    return 400 if surface == "voice" else 1024
 
 
 def _live_order_summary(tool_name: str, tool_input: dict) -> tuple[str, str, list, str, float]:
@@ -624,8 +652,8 @@ def _run_agent_demo(
 
     for _ in range(8):
         response = client.messages.create(
-            model=AGENT_MODEL,
-            max_tokens=1024,
+            model=_model_for(surface),
+            max_tokens=_max_tokens_for(surface),
             system=system_prompt,
             tools=TOOLS,
             messages=messages,
@@ -663,7 +691,15 @@ def _run_agent_live(
         system_prompt = (
             VOICE_SYSTEM_PROMPT if surface == "voice" else CHAT_SYSTEM_PROMPT
         ) + LIVE_SYSTEM_SUFFIX
+        if DEFAULT_ADDRESS_ID:
+            system_prompt += (
+                f"\n\nDEFAULT DELIVERY ADDRESS: {DEFAULT_ADDRESS_LABEL} ({DEFAULT_ADDRESS_AREA}), "
+                f"addressId {DEFAULT_ADDRESS_ID}. Use this addressId directly for all orders. "
+                "Do NOT call get_addresses at all unless the user explicitly asks to change, "
+                "list, or pick a different address."
+            )
         confirmed = _is_confirmation(user_message)
+        active = _route_servers(user_message, surface)
         mcp_servers = [
             {
                 "type": "url",
@@ -672,6 +708,7 @@ def _run_agent_live(
                 "authorization_token": tokens[MCP_AUTH_KEYS[name]],
             }
             for name, url in SWIGGY_SERVERS.items()
+            if name in active
         ]
         tools = [
             {
@@ -683,14 +720,14 @@ def _run_agent_live(
                     for tool in SPEND_TOOLS[name]
                 },
             }
-            for name in SWIGGY_SERVERS
+            for name in active
         ]
         tools.extend(LIVE_LOCAL_TOOLS)
 
         for _ in range(8):
             response = client.beta.messages.create(
-                model=AGENT_MODEL,
-                max_tokens=1024,
+                model=_model_for(surface),
+                max_tokens=_max_tokens_for(surface),
                 system=system_prompt,
                 tools=tools,
                 mcp_servers=mcp_servers,
