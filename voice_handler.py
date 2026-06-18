@@ -48,9 +48,50 @@ def clean_for_voice(text: str) -> str:
 load_dotenv()
 
 router = APIRouter(prefix="/voice", tags=["voice"])
+voice_logger = logging.getLogger("uvicorn.error")
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+SPEECH_HINTS = ",".join(
+    [
+        "yes",
+        "haan",
+        "no",
+        "nahi",
+        "confirm",
+        "cancel",
+        "order",
+        "theek hai",
+        "biryani",
+        "pizza",
+        "burger",
+        "dosa",
+        "idli",
+        "vada",
+        "paratha",
+        "roll",
+        "momos",
+        "noodles",
+        "fried rice",
+        "paneer",
+        "chicken",
+        "butter chicken",
+        "rajma",
+        "chole",
+        "milk",
+        "eggs",
+        "bread",
+        "gatorade",
+        "coke",
+        "water",
+        "chips",
+        "curd",
+        "cheese",
+        "diapers",
+        "detergent",
+        "toothpaste",
+    ]
+)
 
 # Circuit breaker — skip ElevenLabs after repeated 4xx failures
 _el_failures = 0
@@ -67,6 +108,14 @@ def get_base_url() -> str:
 
 # TTS cache — avoid re-generating same phrases
 _tts_cache: dict[str, str] = {}
+
+
+def log_voice_input(call_sid: str, speech_result: str, confidence: float) -> None:
+    voice_logger.info("VOICE in call=%s speech=%r confidence=%.2f", call_sid, speech_result, confidence)
+
+
+def log_voice_output(call_sid: str, elapsed: float, agent_response: str) -> None:
+    voice_logger.info("VOICE out call=%s elapsed=%.1fs reply=%r", call_sid, elapsed, agent_response)
 
 
 async def generate_tts_audio(text: str) -> Optional[str]:
@@ -160,7 +209,7 @@ async def make_twiml_response(
             timeout=gather_timeout,
             speech_timeout="auto",
             language="en-IN",
-            hints="yes,haan,no,nahi,confirm,cancel,biryani,pizza,milk,eggs,bread,order,theek hai"
+            hints=SPEECH_HINTS,
         )
         if audio_url:
             gather.play(audio_url)
@@ -232,7 +281,7 @@ async def voice_process(request: Request):
     call_sid = form.get("CallSid", "unknown")
     speech_result = form.get("SpeechResult", "")
     confidence = float(form.get("Confidence", 0))
-    logging.info("VOICE in call=%s speech=%r", call_sid, speech_result)
+    log_voice_input(call_sid, speech_result, confidence)
 
     # NOTE: Confidence check removed — Twilio returns 0.0 for short but valid
     # utterances like "yes", "haan", "okay", which breaks the confirmation flow.
@@ -262,7 +311,7 @@ async def voice_process(request: Request):
         surface="voice"
     )
     elapsed = time.monotonic() - start
-    logging.info("VOICE out call=%s elapsed=%.1fs reply=%r", call_sid, elapsed, agent_response)
+    log_voice_output(call_sid, elapsed, agent_response)
 
     # Check if order is complete → hang up after speaking
     final = is_order_complete(agent_response)
