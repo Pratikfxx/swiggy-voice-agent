@@ -48,6 +48,16 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech, "one masala dosa")
         self.assertEqual(confidence, 0.72)
 
+    def test_clean_for_voice_removes_search_narration_preamble(self):
+        voice_handler = _fresh_voice_handler()
+
+        cleaned = voice_handler.clean_for_voice(
+            "I'll search for milk and bread for you. Got Amul Taaza milk and Modern bread."
+        )
+
+        self.assertNotIn("I'll search", cleaned)
+        self.assertEqual(cleaned, "Got Amul Taaza milk and Modern bread.")
+
     async def test_unusual_activity_disables_elevenlabs_after_first_401(self):
         voice_handler = _fresh_voice_handler()
         voice_handler.ELEVENLABS_API_KEY = "test-elevenlabs-key"

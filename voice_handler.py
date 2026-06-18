@@ -34,6 +34,13 @@ def clean_for_voice(text: str) -> str:
     """Strip emojis, markdown, and symbols that TTS reads literally."""
     # Remove emojis
     text = re.sub(r'[^\x00-\x7Fऀ-ॿÀ-ɏ]+', '', text)
+    # Remove model narration that sounds robotic on a live call.
+    text = re.sub(
+        r"^\s*(?:i(?:'ll| will)|let me|lemme)\s+(?:search|look|check)(?:\s+for)?[^.?!]*[.?!]\s*",
+        "",
+        text,
+        flags=re.I,
+    )
     # Remove markdown bold/italic
     text = re.sub(r'\*+([^*]+)\*+', r'\1', text)
     text = re.sub(r'_+([^_]+)_+', r'\1', text)

@@ -41,6 +41,14 @@ class InstamartOnlyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("dineout", prompt.lower())
         self.assertNotIn("book a table", prompt.lower())
 
+    def test_voice_prompt_optimizes_for_low_friction_top_picks(self):
+        agent = _fresh_agent()
+        prompt = agent.VOICE_SYSTEM_PROMPT
+
+        self.assertIn("Do not say \"I'll search\"", prompt)
+        self.assertIn("pick clear top matches", prompt)
+        self.assertIn("Add these?", prompt)
+
     def test_chat_prompt_is_instamart_only(self):
         agent = _fresh_agent()
         prompt = agent.CHAT_SYSTEM_PROMPT
