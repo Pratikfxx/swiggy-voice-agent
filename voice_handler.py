@@ -118,8 +118,8 @@ _el_disabled_reason = ""
 _EL_MAX_FAILURES = 3
 _EL_BACKOFF_SECS = 300
 DEFAULT_GATHER_TIMEOUT = 7
-VOICE_AGENT_TIMEOUT_SECS = float(os.getenv("VOICE_AGENT_TIMEOUT_SECS", "8.5"))
-VOICE_RESULT_MAX_POLLS = int(os.getenv("VOICE_RESULT_MAX_POLLS", "4"))
+VOICE_AGENT_TIMEOUT_SECS = float(os.getenv("VOICE_AGENT_TIMEOUT_SECS", "16.0"))
+VOICE_RESULT_MAX_POLLS = int(os.getenv("VOICE_RESULT_MAX_POLLS", "8"))
 SILENCE_REPROMPT = "I didn't catch that. Say the item again, or say cancel."
 VOICE_AGENT_TIMEOUT_MESSAGE = (
     "Swiggy is taking a bit longer. I'm still here. "

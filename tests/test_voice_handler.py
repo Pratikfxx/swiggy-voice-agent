@@ -170,6 +170,12 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Still checking Instamart", twiml)
         self.assertIn("/voice/result", twiml)
 
+    def test_voice_polling_budget_allows_live_search_to_finish_without_dead_air(self):
+        voice_handler = _fresh_voice_handler()
+
+        self.assertGreaterEqual(voice_handler.VOICE_RESULT_MAX_POLLS, 8)
+        self.assertGreaterEqual(voice_handler.VOICE_AGENT_TIMEOUT_SECS, 15)
+
     async def test_voice_process_acknowledges_multi_item_requests_without_agent_gap(self):
         voice_handler = _fresh_voice_handler()
 
