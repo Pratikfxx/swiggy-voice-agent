@@ -1,0 +1,27 @@
+name: Swiggy Token Health
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SWIGGY_HEALTH_URL: https://pure-adventure-production-3bb1.up.railway.app/health
+  SWIGGY_TOKEN_WARN_HOURS: "24"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check Swiggy token expiry
+        run: |
+          python scripts/check_swiggy_token_health.py \
+            --url "$SWIGGY_HEALTH_URL" \
+            --warn-hours "$SWIGGY_TOKEN_WARN_HOURS"
