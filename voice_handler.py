@@ -19,6 +19,7 @@ import hashlib
 import json
 import asyncio
 import httpx
+from urllib.parse import quote
 from typing import Optional
 from fastapi import APIRouter, Request, Form
 from fastapi.responses import Response
@@ -118,6 +119,7 @@ _EL_MAX_FAILURES = 3
 _EL_BACKOFF_SECS = 300
 DEFAULT_GATHER_TIMEOUT = 7
 VOICE_AGENT_TIMEOUT_SECS = float(os.getenv("VOICE_AGENT_TIMEOUT_SECS", "8.5"))
+VOICE_RESULT_MAX_POLLS = int(os.getenv("VOICE_RESULT_MAX_POLLS", "4"))
 SILENCE_REPROMPT = "I didn't catch that. Say the item again, or say cancel."
 VOICE_AGENT_TIMEOUT_MESSAGE = (
     "Swiggy is taking a bit longer. I'm still here. "
@@ -134,6 +136,10 @@ def get_base_url() -> str:
 # TTS cache — avoid re-generating same phrases
 _tts_cache: dict[str, str] = {}
 _voice_fast_pending: dict[str, str] = {}
+_voice_agent_tasks: dict[str, asyncio.Task] = {}
+_voice_agent_results: dict[str, dict] = {}
+_voice_agent_job_ids: dict[str, int] = {}
+_voice_agent_next_job_id = 0
 
 
 def log_voice_input(call_sid: str, speech_result: str, confidence: float) -> None:
@@ -202,6 +208,50 @@ async def run_voice_agent_with_deadline(call_sid: str, speech_result: str) -> tu
 
     elapsed = time.monotonic() - start
     return agent_response, elapsed, False
+
+
+async def _run_voice_agent_background(call_sid: str, speech_result: str, job_id: int) -> None:
+    try:
+        agent_response, elapsed, timed_out = await run_voice_agent_with_deadline(call_sid, speech_result)
+        final = False if timed_out else is_order_complete(agent_response)
+        result = {
+            "response": agent_response,
+            "elapsed": elapsed,
+            "final": final,
+        }
+    except Exception:
+        voice_logger.exception("VOICE background failed call=%s speech=%r", call_sid, speech_result)
+        result = {
+            "response": "Sorry, I hit a problem reaching Swiggy. Please try again in a moment.",
+            "elapsed": 0.0,
+            "final": False,
+        }
+
+    if _voice_agent_job_ids.get(call_sid) == job_id:
+        _voice_agent_results[call_sid] = result
+        _voice_agent_tasks.pop(call_sid, None)
+
+
+def start_voice_agent_job(call_sid: str, speech_result: str) -> None:
+    global _voice_agent_next_job_id
+    _voice_agent_next_job_id += 1
+    job_id = _voice_agent_next_job_id
+    _voice_agent_job_ids[call_sid] = job_id
+    _voice_agent_results.pop(call_sid, None)
+    _voice_agent_tasks[call_sid] = asyncio.create_task(
+        _run_voice_agent_background(call_sid, speech_result, job_id)
+    )
+
+
+def make_voice_waiting_twiml(call_sid: str, message: str, poll: int = 1) -> str:
+    vr = VoiceResponse()
+    vr.say(message, voice="Polly.Aditi", language="en-IN")
+    vr.pause(length=1)
+    vr.redirect(
+        f"{get_base_url()}/voice/result?callSid={quote(call_sid)}&poll={poll}",
+        method="POST",
+    )
+    return str(vr)
 
 
 def _elevenlabs_error_status(response_text: str) -> str:
@@ -425,22 +475,53 @@ async def voice_process(request: Request):
         )
         return Response(content=twiml, media_type="application/xml")
 
-    # Run the synchronous Swiggy/Claude turn off the event loop, with a hard
-    # phone-call deadline so Twilio gets TwiML instead of a network timeout.
-    agent_response, elapsed, timed_out = await run_voice_agent_with_deadline(call_sid, speech_result)
-    if not timed_out:
+    start_voice_agent_job(call_sid, speech_result)
+    twiml = make_voice_waiting_twiml(call_sid, "Checking Instamart now. One moment.")
+    return Response(content=twiml, media_type="application/xml")
+
+
+@router.post("/result")
+async def voice_result(request: Request):
+    """Poll for a background voice agent result while keeping the call audible."""
+    form = await request.form()
+    call_sid = request.query_params.get("callSid") or form.get("CallSid", "")
+    try:
+        poll = int(request.query_params.get("poll", "1"))
+    except ValueError:
+        poll = 1
+
+    result = _voice_agent_results.pop(call_sid, None)
+    if result:
+        _voice_agent_job_ids.pop(call_sid, None)
+        _voice_agent_tasks.pop(call_sid, None)
+        agent_response = result["response"]
+        elapsed = float(result.get("elapsed", 0.0))
+        final = bool(result.get("final", False))
         log_voice_output(call_sid, elapsed, agent_response)
+        if final:
+            clear_session(call_sid)
+        twiml = await make_twiml_response(
+            agent_text=agent_response,
+            session_id=call_sid,
+            is_final=final,
+            gather_timeout=DEFAULT_GATHER_TIMEOUT,
+        )
+        return Response(content=twiml, media_type="application/xml")
 
-    # Check if order is complete → hang up after speaking
-    final = False if timed_out else is_order_complete(agent_response)
-    if final:
-        clear_session(call_sid)
+    if poll < VOICE_RESULT_MAX_POLLS:
+        twiml = make_voice_waiting_twiml(
+            call_sid,
+            "Still checking Instamart.",
+            poll=poll + 1,
+        )
+        return Response(content=twiml, media_type="application/xml")
 
+    _voice_agent_job_ids.pop(call_sid, None)
+    _voice_agent_tasks.pop(call_sid, None)
     twiml = await make_twiml_response(
-        agent_text=agent_response,
+        VOICE_AGENT_TIMEOUT_MESSAGE,
         session_id=call_sid,
-        is_final=final,
-        gather_timeout=DEFAULT_GATHER_TIMEOUT
+        gather_timeout=DEFAULT_GATHER_TIMEOUT,
     )
     return Response(content=twiml, media_type="application/xml")
 

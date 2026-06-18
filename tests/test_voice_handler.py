@@ -50,16 +50,8 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech, "one masala dosa")
         self.assertEqual(confidence, 0.72)
 
-    async def test_voice_process_returns_keepalive_when_agent_exceeds_deadline(self):
+    async def test_run_voice_agent_with_deadline_returns_keepalive_when_agent_exceeds_deadline(self):
         voice_handler = _fresh_voice_handler()
-
-        class FakeRequest:
-            async def form(self):
-                return {
-                    "CallSid": "slow-call",
-                    "SpeechResult": "get milk",
-                    "Confidence": "0.94",
-                }
 
         def slow_process_message(*args, **kwargs):
             time.sleep(0.2)
@@ -67,19 +59,18 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(voice_handler, "process_message", side_effect=slow_process_message),
-            patch.object(voice_handler, "generate_tts_audio", return_value=None),
             patch.object(voice_handler, "VOICE_AGENT_TIMEOUT_SECS", 0.05, create=True),
         ):
             start = time.monotonic()
-            response = await voice_handler.voice_process(FakeRequest())
+            agent_response, elapsed, timed_out = await voice_handler.run_voice_agent_with_deadline(
+                "slow-call",
+                "get milk",
+            )
             elapsed = time.monotonic() - start
 
-        twiml = response.body.decode()
         self.assertLess(elapsed, 0.15)
-        self.assertIn("taking a bit longer", twiml)
-        self.assertIn("<Gather", twiml)
-        self.assertNotIn("Late agent response", twiml)
-        self.assertNotIn("<Hangup", twiml)
+        self.assertTrue(timed_out)
+        self.assertIn("taking a bit longer", agent_response)
 
     async def test_voice_process_does_not_block_event_loop_during_slow_agent(self):
         voice_handler = _fresh_voice_handler()
@@ -108,6 +99,76 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
             await task
 
         self.assertLess(event_loop_delay, 0.08)
+
+    async def test_voice_process_starts_background_job_without_waiting_for_single_item(self):
+        voice_handler = _fresh_voice_handler()
+
+        class FakeRequest:
+            async def form(self):
+                return {
+                    "CallSid": "background-call",
+                    "SpeechResult": "get gatorade",
+                    "Confidence": "0.94",
+                }
+
+        def slow_process_message(*args, **kwargs):
+            time.sleep(0.2)
+            return "I found Gatorade. Add this?"
+
+        with (
+            patch.object(voice_handler, "process_message", side_effect=slow_process_message),
+            patch.object(voice_handler, "generate_tts_audio", return_value=None),
+        ):
+            start = time.monotonic()
+            response = await voice_handler.voice_process(FakeRequest())
+            elapsed = time.monotonic() - start
+            await asyncio.sleep(0.25)
+
+        twiml = response.body.decode()
+        self.assertLess(elapsed, 0.08)
+        self.assertIn("Checking Instamart", twiml)
+        self.assertIn("/voice/result", twiml)
+        self.assertIn("background-call", voice_handler._voice_agent_results)
+
+    async def test_voice_result_returns_ready_background_response(self):
+        voice_handler = _fresh_voice_handler()
+        voice_handler._voice_agent_results["ready-call"] = {
+            "response": "I found Gatorade. Add this?",
+            "elapsed": 0.5,
+            "final": False,
+        }
+
+        class FakeRequest:
+            query_params = {"callSid": "ready-call", "poll": "1"}
+
+            async def form(self):
+                return {}
+
+        with patch.object(voice_handler, "generate_tts_audio", return_value=None):
+            response = await voice_handler.voice_result(FakeRequest())
+
+        twiml = response.body.decode()
+        self.assertIn("I found Gatorade", twiml)
+        self.assertIn("<Gather", twiml)
+        self.assertNotIn("ready-call", voice_handler._voice_agent_results)
+
+    async def test_voice_result_keeps_call_alive_while_background_job_is_pending(self):
+        voice_handler = _fresh_voice_handler()
+        task = asyncio.create_task(asyncio.sleep(0.2))
+        voice_handler._voice_agent_tasks["pending-result-call"] = task
+
+        class FakeRequest:
+            query_params = {"callSid": "pending-result-call", "poll": "1"}
+
+            async def form(self):
+                return {}
+
+        response = await voice_handler.voice_result(FakeRequest())
+        task.cancel()
+
+        twiml = response.body.decode()
+        self.assertIn("Still checking Instamart", twiml)
+        self.assertIn("/voice/result", twiml)
 
     async def test_voice_process_acknowledges_multi_item_requests_without_agent_gap(self):
         voice_handler = _fresh_voice_handler()
@@ -158,10 +219,15 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(voice_handler, "generate_tts_audio", return_value=None),
         ):
             response = await voice_handler.voice_process(FakeRequest())
+            await asyncio.sleep(0.05)
 
         twiml = response.body.decode()
         self.assertNotIn("pending-call", voice_handler._voice_fast_pending)
-        self.assertIn("I found Amul milk", twiml)
+        self.assertIn("Checking Instamart", twiml)
+        self.assertEqual(
+            voice_handler._voice_agent_results["pending-call"]["response"],
+            "I found Amul milk. Add this?",
+        )
 
     def test_clean_for_voice_removes_search_narration_preamble(self):
         voice_handler = _fresh_voice_handler()
