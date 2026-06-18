@@ -17,6 +17,7 @@ import re
 import time
 import hashlib
 import json
+import asyncio
 import httpx
 from typing import Optional
 from fastapi import APIRouter, Request, Form
@@ -110,7 +111,12 @@ _el_disabled_reason = ""
 _EL_MAX_FAILURES = 3
 _EL_BACKOFF_SECS = 300
 DEFAULT_GATHER_TIMEOUT = 7
+VOICE_AGENT_TIMEOUT_SECS = float(os.getenv("VOICE_AGENT_TIMEOUT_SECS", "10.5"))
 SILENCE_REPROMPT = "I didn't catch that. Say the item again, or say cancel."
+VOICE_AGENT_TIMEOUT_MESSAGE = (
+    "Swiggy is taking a bit longer. I'm still here. "
+    "Say the item again, or try one item at a time."
+)
 
 
 def get_base_url() -> str:
@@ -129,6 +135,32 @@ def log_voice_input(call_sid: str, speech_result: str, confidence: float) -> Non
 
 def log_voice_output(call_sid: str, elapsed: float, agent_response: str) -> None:
     voice_logger.info("VOICE out call=%s elapsed=%.1fs reply=%r", call_sid, elapsed, agent_response)
+
+
+async def run_voice_agent_with_deadline(call_sid: str, speech_result: str) -> tuple[str, float, bool]:
+    start = time.monotonic()
+    try:
+        agent_response = await asyncio.wait_for(
+            asyncio.to_thread(
+                process_message,
+                session_id=call_sid,
+                user_message=speech_result,
+                surface="voice",
+            ),
+            timeout=VOICE_AGENT_TIMEOUT_SECS,
+        )
+    except asyncio.TimeoutError:
+        elapsed = time.monotonic() - start
+        voice_logger.warning(
+            "VOICE timeout call=%s elapsed=%.1fs speech=%r",
+            call_sid,
+            elapsed,
+            speech_result,
+        )
+        return VOICE_AGENT_TIMEOUT_MESSAGE, elapsed, True
+
+    elapsed = time.monotonic() - start
+    return agent_response, elapsed, False
 
 
 def _elevenlabs_error_status(response_text: str) -> str:
@@ -343,18 +375,14 @@ async def voice_process(request: Request):
         )
         return Response(content=twiml, media_type="application/xml")
 
-    # Run agent
-    start = time.monotonic()
-    agent_response = process_message(
-        session_id=call_sid,
-        user_message=speech_result,
-        surface="voice"
-    )
-    elapsed = time.monotonic() - start
-    log_voice_output(call_sid, elapsed, agent_response)
+    # Run the synchronous Swiggy/Claude turn off the event loop, with a hard
+    # phone-call deadline so Twilio gets TwiML instead of a network timeout.
+    agent_response, elapsed, timed_out = await run_voice_agent_with_deadline(call_sid, speech_result)
+    if not timed_out:
+        log_voice_output(call_sid, elapsed, agent_response)
 
     # Check if order is complete → hang up after speaking
-    final = is_order_complete(agent_response)
+    final = False if timed_out else is_order_complete(agent_response)
     if final:
         clear_session(call_sid)
 

@@ -1,5 +1,7 @@
 import importlib
+import asyncio
 import sys
+import time
 import unittest
 import warnings
 from unittest.mock import patch
@@ -47,6 +49,65 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_sid, "call-test")
         self.assertEqual(speech, "one masala dosa")
         self.assertEqual(confidence, 0.72)
+
+    async def test_voice_process_returns_keepalive_when_agent_exceeds_deadline(self):
+        voice_handler = _fresh_voice_handler()
+
+        class FakeRequest:
+            async def form(self):
+                return {
+                    "CallSid": "slow-call",
+                    "SpeechResult": "get milk and bread",
+                    "Confidence": "0.94",
+                }
+
+        def slow_process_message(*args, **kwargs):
+            time.sleep(0.2)
+            return "Late agent response"
+
+        with (
+            patch.object(voice_handler, "process_message", side_effect=slow_process_message),
+            patch.object(voice_handler, "generate_tts_audio", return_value=None),
+            patch.object(voice_handler, "VOICE_AGENT_TIMEOUT_SECS", 0.05, create=True),
+        ):
+            start = time.monotonic()
+            response = await voice_handler.voice_process(FakeRequest())
+            elapsed = time.monotonic() - start
+
+        twiml = response.body.decode()
+        self.assertLess(elapsed, 0.15)
+        self.assertIn("taking a bit longer", twiml)
+        self.assertIn("<Gather", twiml)
+        self.assertNotIn("Late agent response", twiml)
+        self.assertNotIn("<Hangup", twiml)
+
+    async def test_voice_process_does_not_block_event_loop_during_slow_agent(self):
+        voice_handler = _fresh_voice_handler()
+
+        class FakeRequest:
+            async def form(self):
+                return {
+                    "CallSid": "nonblocking-call",
+                    "SpeechResult": "get milk",
+                    "Confidence": "0.94",
+                }
+
+        def slow_process_message(*args, **kwargs):
+            time.sleep(0.2)
+            return "Late agent response"
+
+        with (
+            patch.object(voice_handler, "process_message", side_effect=slow_process_message),
+            patch.object(voice_handler, "generate_tts_audio", return_value=None),
+            patch.object(voice_handler, "VOICE_AGENT_TIMEOUT_SECS", 0.05, create=True),
+        ):
+            start = time.monotonic()
+            task = asyncio.create_task(voice_handler.voice_process(FakeRequest()))
+            await asyncio.sleep(0.01)
+            event_loop_delay = time.monotonic() - start
+            await task
+
+        self.assertLess(event_loop_delay, 0.08)
 
     def test_clean_for_voice_removes_search_narration_preamble(self):
         voice_handler = _fresh_voice_handler()
