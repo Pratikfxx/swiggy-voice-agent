@@ -21,6 +21,12 @@ class DeployConfigTests(unittest.TestCase):
         self.assertIn('builder = "DOCKERFILE"', config)
         self.assertIn('dockerfilePath = "Dockerfile"', config)
 
+    def test_dockerfile_deploy_uses_docker_cmd_for_port_expansion(self):
+        config = (ROOT / "railway.toml").read_text(encoding="utf-8")
+
+        self.assertNotIn("startCommand", config)
+        self.assertIn("${PORT:-8000}", (ROOT / "Dockerfile").read_text(encoding="utf-8"))
+
     def test_dockerfile_does_not_declare_runtime_secrets(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
