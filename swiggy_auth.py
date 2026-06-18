@@ -316,24 +316,58 @@ def get_all_access_tokens() -> dict[str, str]:
     return {key: get_access_token(key) for key in RESOURCES}
 
 
+def _env_token_expiry(token: str, now: float) -> tuple[int | None, bool]:
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None, False
+
+    try:
+        payload_part = parts[1]
+        payload_part += "=" * (-len(payload_part) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_part.encode("ascii")))
+    except (ValueError, json.JSONDecodeError):
+        return None, False
+
+    exp = payload.get("exp") if isinstance(payload, dict) else None
+    if not isinstance(exp, (int, float)):
+        return None, False
+
+    expires_in_s = max(0, int(exp - now))
+    return expires_in_s, expires_in_s == 0
+
+
 def status() -> dict[str, dict[str, Any]]:
     store = _load_store()
     now = time.time()
     result: dict[str, dict[str, Any]] = {}
     for key in RESOURCES:
-        if os.environ.get(ENV_TOKEN_VARS[key]):
-            result[key] = {"logged_in": True, "source": "env", "expires_in_s": None}
+        env_token = os.environ.get(ENV_TOKEN_VARS[key])
+        if env_token:
+            expires_in_s, expired = _env_token_expiry(env_token, now)
+            result[key] = {
+                "logged_in": True,
+                "source": "env",
+                "expires_in_s": expires_in_s,
+                "expired": expired,
+            }
             continue
 
         record = store.get(key)
         if not record:
-            result[key] = {"logged_in": False, "expires_in_s": None, "status": "needs login"}
+            result[key] = {
+                "logged_in": False,
+                "expires_in_s": None,
+                "expired": True,
+                "status": "needs login",
+            }
             continue
         expires_at = float(record.get("expires_at", 0))
+        expires_in_s = max(0, int(expires_at - now))
         result[key] = {
             "logged_in": True,
             "source": "file",
-            "expires_in_s": max(0, int(expires_at - now)),
+            "expires_in_s": expires_in_s,
+            "expired": expires_in_s == 0,
         }
     return result
 

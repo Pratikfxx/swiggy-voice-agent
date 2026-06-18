@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from dotenv import load_dotenv
 
+import swiggy_auth
 import swiggy_address
 from voice_handler import router as voice_router
 from whatsapp_handler import router as whatsapp_router
@@ -44,12 +45,25 @@ async def _warm():
 
 @app.get("/health")
 def health():
+    try:
+        swiggy_tokens = swiggy_auth.status()
+        swiggy_ready = all(
+            info.get("logged_in") and not info.get("expired", False)
+            for info in swiggy_tokens.values()
+        )
+    except Exception as exc:
+        logging.exception("swiggy auth health failed")
+        swiggy_tokens = {"error": exc.__class__.__name__}
+        swiggy_ready = False
+
     return {
         "status": "ok",
         "demo_mode": os.getenv("DEMO_MODE", "true"),
         "anthropic": bool(os.getenv("ANTHROPIC_API_KEY")),
         "twilio": bool(os.getenv("TWILIO_ACCOUNT_SID")),
         "elevenlabs": bool(os.getenv("ELEVENLABS_API_KEY")),
+        "swiggy": swiggy_ready,
+        "swiggy_tokens": swiggy_tokens,
     }
 
 
