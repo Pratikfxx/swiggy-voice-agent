@@ -16,6 +16,7 @@ import os
 import re
 import time
 import hashlib
+import json
 import httpx
 from typing import Optional
 from fastapi import APIRouter, Request, Form
@@ -61,23 +62,13 @@ SPEECH_HINTS = ",".join(
         "confirm",
         "cancel",
         "order",
+        "instamart",
+        "grocery",
+        "groceries",
         "theek hai",
-        "biryani",
-        "pizza",
-        "burger",
-        "dosa",
-        "idli",
-        "vada",
-        "paratha",
-        "roll",
-        "momos",
         "noodles",
-        "fried rice",
         "paneer",
         "chicken",
-        "butter chicken",
-        "rajma",
-        "chole",
         "milk",
         "eggs",
         "bread",
@@ -87,6 +78,18 @@ SPEECH_HINTS = ",".join(
         "chips",
         "curd",
         "cheese",
+        "maggi",
+        "atta",
+        "rice",
+        "oil",
+        "sugar",
+        "salt",
+        "soap",
+        "shampoo",
+        "chocolate",
+        "ice cream",
+        "coffee",
+        "tea",
         "diapers",
         "detergent",
         "toothpaste",
@@ -96,6 +99,7 @@ SPEECH_HINTS = ",".join(
 # Circuit breaker — skip ElevenLabs after repeated 4xx failures
 _el_failures = 0
 _el_disabled_until = 0.0
+_el_disabled_reason = ""
 _EL_MAX_FAILURES = 3
 _EL_BACKOFF_SECS = 300
 DEFAULT_GATHER_TIMEOUT = 7
@@ -120,6 +124,15 @@ def log_voice_output(call_sid: str, elapsed: float, agent_response: str) -> None
     voice_logger.info("VOICE out call=%s elapsed=%.1fs reply=%r", call_sid, elapsed, agent_response)
 
 
+def _elevenlabs_error_status(response_text: str) -> str:
+    try:
+        payload = json.loads(response_text or "{}")
+    except json.JSONDecodeError:
+        return ""
+    detail = payload.get("detail", {})
+    return detail.get("status", "") if isinstance(detail, dict) else ""
+
+
 async def generate_tts_audio(text: str) -> Optional[str]:
     """
     Generate speech audio via ElevenLabs (async to avoid blocking event loop).
@@ -130,7 +143,7 @@ async def generate_tts_audio(text: str) -> Optional[str]:
     - Removed invalid 'speed' from voice_settings (not a valid field).
     - Updated to eleven_turbo_v2_5 for lower latency.
     """
-    global _el_failures, _el_disabled_until
+    global _el_failures, _el_disabled_until, _el_disabled_reason
     if not ELEVENLABS_API_KEY:
         return None
     if _el_failures >= _EL_MAX_FAILURES and time.time() < _el_disabled_until:
@@ -166,13 +179,23 @@ async def generate_tts_audio(text: str) -> Optional[str]:
             _tts_cache[cache_key] = url
             return url
         else:
-            print(f"ElevenLabs TTS error {response.status_code}: {response.text[:200]}")
+            status = _elevenlabs_error_status(response.text)
+            if response.status_code == 401 and status == "detected_unusual_activity":
+                _el_failures = _EL_MAX_FAILURES
+                _el_disabled_until = float("inf")
+                _el_disabled_reason = status
+                voice_logger.warning(
+                    "ElevenLabs disabled for this container: detected unusual activity; using Twilio Polly fallback"
+                )
+                return None
+            voice_logger.warning("ElevenLabs TTS error status=%s body=%s", response.status_code, response.text[:200])
             _el_failures += 1
             if _el_failures >= _EL_MAX_FAILURES:
                 _el_disabled_until = time.time() + _EL_BACKOFF_SECS
-                logging.warning("ElevenLabs circuit open for %ds (failure #%d)", _EL_BACKOFF_SECS, _el_failures)
+                _el_disabled_reason = f"http_{response.status_code}"
+                voice_logger.warning("ElevenLabs circuit open for %ds (failure #%d)", _EL_BACKOFF_SECS, _el_failures)
     except Exception as e:
-        print(f"ElevenLabs TTS exception: {e}")
+        voice_logger.warning("ElevenLabs TTS exception: %s", e)
     return None
 
 
@@ -275,7 +298,7 @@ async def voice_answer(request: Request):
     form = await request.form()
     call_sid = form.get("CallSid", "unknown")
 
-    greeting = "Hi, Welcome to Swiggy! What would you like to order?"
+    greeting = "Hi, this is Swiggy Instamart. What groceries or essentials should I get for you?"
 
     twiml = await make_twiml_response(greeting, session_id=call_sid)
     return Response(content=twiml, media_type="application/xml")
@@ -300,7 +323,7 @@ async def voice_process(request: Request):
     # Farewell check
     if is_farewell(speech_result):
         vr = VoiceResponse()
-        vr.say("Alright, no problem! Call back anytime you're hungry. Goodbye!", voice="Polly.Aditi", language="en-IN")
+        vr.say("Alright, no problem. Call back anytime. Goodbye!", voice="Polly.Aditi", language="en-IN")
         vr.hangup()
         clear_session(call_sid)
         return Response(content=str(vr), media_type="application/xml")
@@ -308,7 +331,7 @@ async def voice_process(request: Request):
     # Empty input
     if not speech_result.strip():
         twiml = await make_twiml_response(
-            "I'm here! What would you like to order?",
+            "I'm here. What Instamart items should I get for you?",
             session_id=call_sid
         )
         return Response(content=twiml, media_type="application/xml")

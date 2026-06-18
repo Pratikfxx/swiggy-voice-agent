@@ -21,7 +21,7 @@ def _fresh_agent():
 
 
 class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_gather_hints_cover_common_food_and_grocery_orders(self):
+    async def test_gather_hints_cover_common_instamart_orders(self):
         voice_handler = _fresh_voice_handler()
 
         with patch.object(voice_handler, "generate_tts_audio", return_value=None):
@@ -30,8 +30,10 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
                 session_id="call-test",
             )
 
-        for expected in ("dosa", "burger", "gatorade", "paneer", "diapers", "coke"):
+        for expected in ("gatorade", "paneer", "diapers", "coke", "milk", "detergent"):
             self.assertIn(expected, twiml)
+        for stale in ("dosa", "burger", "biryani"):
+            self.assertNotIn(stale, twiml)
 
     def test_voice_turn_logging_uses_visible_uvicorn_logger(self):
         voice_handler = _fresh_voice_handler()
@@ -45,6 +47,43 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_sid, "call-test")
         self.assertEqual(speech, "one masala dosa")
         self.assertEqual(confidence, 0.72)
+
+    async def test_unusual_activity_disables_elevenlabs_after_first_401(self):
+        voice_handler = _fresh_voice_handler()
+        voice_handler.ELEVENLABS_API_KEY = "test-elevenlabs-key"
+        post_calls = 0
+
+        class FakeResponse:
+            status_code = 401
+            text = '{"detail":{"status":"detected_unusual_activity","message":"Free Tier access disabled"}}'
+            content = b""
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def post(self, *args, **kwargs):
+                nonlocal post_calls
+                post_calls += 1
+                return FakeResponse()
+
+        with (
+            patch.object(voice_handler.httpx, "AsyncClient", FakeAsyncClient),
+            patch.object(voice_handler.voice_logger, "warning") as warning,
+        ):
+            first = await voice_handler.generate_tts_audio("Hello there")
+            second = await voice_handler.generate_tts_audio("Hello again")
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(post_calls, 1)
+        warning.assert_called()
 
     async def test_non_final_response_reprompts_instead_of_hanging_up_after_silence(self):
         voice_handler = _fresh_voice_handler()
