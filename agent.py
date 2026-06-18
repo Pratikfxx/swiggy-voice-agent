@@ -35,7 +35,7 @@ from swiggy_tools import (
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 AGENT_MODEL = os.getenv("AGENT_MODEL", "claude-sonnet-4-6")
 VOICE_MODEL = os.getenv("VOICE_MODEL", "claude-haiku-4-5")
-VOICE_API_TIMEOUT_SECS = float(os.getenv("VOICE_API_TIMEOUT_SECS", "9.0"))
+VOICE_API_TIMEOUT_SECS = float(os.getenv("VOICE_API_TIMEOUT_SECS", "7.0"))
 CHAT_API_TIMEOUT_SECS = float(os.getenv("CHAT_API_TIMEOUT_SECS", "30.0"))
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 DEFAULT_ADDRESS_ID = os.getenv("DEFAULT_ADDRESS_ID", "")
@@ -547,6 +547,10 @@ def _api_timeout_for(surface):
     return VOICE_API_TIMEOUT_SECS if surface == "voice" else CHAT_API_TIMEOUT_SECS
 
 
+def _api_speed_for(surface):
+    return "fast" if surface == "voice" else "standard"
+
+
 def _live_order_summary(tool_name: str, tool_input: dict) -> tuple[str, str, list, str, float]:
     if not isinstance(tool_input, dict):
         tool_input = {}
@@ -760,6 +764,7 @@ def _run_agent_live(
                 betas=["mcp-client-2025-11-20"],
                 messages=messages,
                 timeout=_api_timeout_for(surface),
+                speed=_api_speed_for(surface),
             )
             messages.append({"role": "assistant", "content": response.content})
 

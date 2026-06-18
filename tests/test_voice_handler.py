@@ -57,7 +57,7 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
             async def form(self):
                 return {
                     "CallSid": "slow-call",
-                    "SpeechResult": "get milk and bread",
+                    "SpeechResult": "get milk",
                     "Confidence": "0.94",
                 }
 
@@ -108,6 +108,60 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
             await task
 
         self.assertLess(event_loop_delay, 0.08)
+
+    async def test_voice_process_acknowledges_multi_item_requests_without_agent_gap(self):
+        voice_handler = _fresh_voice_handler()
+
+        class FakeRequest:
+            async def form(self):
+                return {
+                    "CallSid": "multi-item-call",
+                    "SpeechResult": "get milk and bread",
+                    "Confidence": "0.94",
+                }
+
+        with (
+            patch.object(voice_handler, "process_message") as process_message,
+            patch.object(voice_handler, "generate_tts_audio", return_value=None),
+        ):
+            start = time.monotonic()
+            response = await voice_handler.voice_process(FakeRequest())
+            elapsed = time.monotonic() - start
+
+        twiml = response.body.decode()
+        process_message.assert_not_called()
+        self.assertLess(elapsed, 0.05)
+        self.assertIn("one item at a time", twiml)
+        self.assertIn("milk", twiml)
+        self.assertIn("bread", twiml)
+        self.assertIn("<Gather", twiml)
+        self.assertNotIn("<Hangup", twiml)
+
+    async def test_voice_process_consumes_fast_pending_item_on_confirmation(self):
+        voice_handler = _fresh_voice_handler()
+        voice_handler._voice_fast_pending["pending-call"] = "milk"
+
+        class FakeRequest:
+            async def form(self):
+                return {
+                    "CallSid": "pending-call",
+                    "SpeechResult": "yes",
+                    "Confidence": "0.94",
+                }
+
+        def fake_process_message(*args, **kwargs):
+            self.assertEqual(kwargs["user_message"], "get milk")
+            return "I found Amul milk. Add this?"
+
+        with (
+            patch.object(voice_handler, "process_message", side_effect=fake_process_message),
+            patch.object(voice_handler, "generate_tts_audio", return_value=None),
+        ):
+            response = await voice_handler.voice_process(FakeRequest())
+
+        twiml = response.body.decode()
+        self.assertNotIn("pending-call", voice_handler._voice_fast_pending)
+        self.assertIn("I found Amul milk", twiml)
 
     def test_clean_for_voice_removes_search_narration_preamble(self):
         voice_handler = _fresh_voice_handler()

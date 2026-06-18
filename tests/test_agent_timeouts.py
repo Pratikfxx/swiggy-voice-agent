@@ -63,6 +63,7 @@ class AgentTimeoutTests(unittest.TestCase):
         self.assertEqual(response, "ok")
         self.assertEqual(captured["timeout"], agent._api_timeout_for("voice"))
         self.assertLess(captured["timeout"], agent._api_timeout_for("chat"))
+        self.assertEqual(captured["speed"], "fast")
 
 
 if __name__ == "__main__":

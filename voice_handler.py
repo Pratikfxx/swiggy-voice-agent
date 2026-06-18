@@ -29,6 +29,12 @@ from agent import process_message, clear_session
 
 
 _FAREWELL_RE = re.compile(r"\b(bye|goodbye|good bye|cancel|hang up|end call|band karo|band kar do|stop)\b", re.I)
+_VOICE_CONFIRM_RE = re.compile(r"\b(yes|yeah|yep|haan|haa|ha|okay|ok|confirm|theek hai|thik hai|sure|go ahead)\b", re.I)
+_VOICE_ITEM_COMMAND_RE = re.compile(
+    r"\b(get|bring|add|order|need|want|me|please|some|a|an|the|from|on|swiggy|instamart|grocery|groceries|items?)\b",
+    re.I,
+)
+_VOICE_ITEM_SPLIT_RE = re.compile(r"\s*(?:,|&|\+|\band\b|\baur\b)\s*", re.I)
 
 
 def clean_for_voice(text: str) -> str:
@@ -111,7 +117,7 @@ _el_disabled_reason = ""
 _EL_MAX_FAILURES = 3
 _EL_BACKOFF_SECS = 300
 DEFAULT_GATHER_TIMEOUT = 7
-VOICE_AGENT_TIMEOUT_SECS = float(os.getenv("VOICE_AGENT_TIMEOUT_SECS", "10.5"))
+VOICE_AGENT_TIMEOUT_SECS = float(os.getenv("VOICE_AGENT_TIMEOUT_SECS", "8.5"))
 SILENCE_REPROMPT = "I didn't catch that. Say the item again, or say cancel."
 VOICE_AGENT_TIMEOUT_MESSAGE = (
     "Swiggy is taking a bit longer. I'm still here. "
@@ -127,6 +133,7 @@ def get_base_url() -> str:
 
 # TTS cache — avoid re-generating same phrases
 _tts_cache: dict[str, str] = {}
+_voice_fast_pending: dict[str, str] = {}
 
 
 def log_voice_input(call_sid: str, speech_result: str, confidence: float) -> None:
@@ -135,6 +142,40 @@ def log_voice_input(call_sid: str, speech_result: str, confidence: float) -> Non
 
 def log_voice_output(call_sid: str, elapsed: float, agent_response: str) -> None:
     voice_logger.info("VOICE out call=%s elapsed=%.1fs reply=%r", call_sid, elapsed, agent_response)
+
+
+def _extract_fast_instamart_items(text: str) -> list[str]:
+    parts = _VOICE_ITEM_SPLIT_RE.split(text or "")
+    items = []
+    for part in parts:
+        item = _VOICE_ITEM_COMMAND_RE.sub(" ", part)
+        item = re.sub(r"\s{2,}", " ", item).strip(" .,!?:;")
+        if item:
+            items.append(item)
+    return items
+
+
+def _fast_voice_reply_or_message(call_sid: str, speech_result: str) -> tuple[str, str]:
+    pending_item = _voice_fast_pending.get(call_sid)
+    if pending_item:
+        _voice_fast_pending.pop(call_sid, None)
+        if _VOICE_CONFIRM_RE.search(speech_result or ""):
+            voice_logger.info("VOICE fast pending call=%s item=%r", call_sid, pending_item)
+            return "", f"get {pending_item}"
+
+    items = _extract_fast_instamart_items(speech_result)
+    if len(items) < 2:
+        return "", speech_result
+
+    first, second = items[0], items[1]
+    _voice_fast_pending[call_sid] = first
+    voice_logger.info("VOICE fast multi-item call=%s first=%r remaining=%r", call_sid, first, items[1:])
+    reply = (
+        "Let's keep the call fast and do one item at a time. "
+        f"Starting with {first}; {second} can come next. "
+        f"Say yes to find {first}, or say another item."
+    )
+    return reply, speech_result
 
 
 async def run_voice_agent_with_deadline(call_sid: str, speech_result: str) -> tuple[str, float, bool]:
@@ -372,6 +413,15 @@ async def voice_process(request: Request):
         twiml = await make_twiml_response(
             "I'm here. What Instamart items should I get for you?",
             session_id=call_sid
+        )
+        return Response(content=twiml, media_type="application/xml")
+
+    fast_reply, speech_result = _fast_voice_reply_or_message(call_sid, speech_result)
+    if fast_reply:
+        twiml = await make_twiml_response(
+            fast_reply,
+            session_id=call_sid,
+            gather_timeout=DEFAULT_GATHER_TIMEOUT
         )
         return Response(content=twiml, media_type="application/xml")
 
