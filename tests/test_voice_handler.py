@@ -13,6 +13,13 @@ def _fresh_voice_handler():
         return importlib.import_module("voice_handler")
 
 
+def _fresh_agent():
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=ResourceWarning)
+        sys.modules.pop("agent", None)
+        return importlib.import_module("agent")
+
+
 class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_gather_hints_cover_common_food_and_grocery_orders(self):
         voice_handler = _fresh_voice_handler()
@@ -38,6 +45,40 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_sid, "call-test")
         self.assertEqual(speech, "one masala dosa")
         self.assertEqual(confidence, 0.72)
+
+    async def test_non_final_response_reprompts_instead_of_hanging_up_after_silence(self):
+        voice_handler = _fresh_voice_handler()
+
+        with patch.object(voice_handler, "generate_tts_audio", return_value=None):
+            twiml = await voice_handler.make_twiml_response(
+                "Found Masala Dosa nearby. Should I add one?",
+                session_id="call-test",
+                is_final=False,
+            )
+
+        self.assertNotIn("Goodbye", twiml)
+        self.assertNotIn("<Hangup", twiml)
+        self.assertGreaterEqual(twiml.count("<Gather"), 2)
+        self.assertIn("I didn't catch that", twiml)
+
+    async def test_non_final_response_uses_more_patient_gather_timeout(self):
+        voice_handler = _fresh_voice_handler()
+
+        with patch.object(voice_handler, "generate_tts_audio", return_value=None):
+            twiml = await voice_handler.make_twiml_response(
+                "What would you like to order?",
+                session_id="call-test",
+                is_final=False,
+            )
+
+        self.assertIn('timeout="7"', twiml)
+
+    def test_voice_prompt_allows_natural_context_instead_of_ultra_clipped_replies(self):
+        agent = _fresh_agent()
+
+        self.assertNotIn("MAX 20 words", agent.VOICE_SYSTEM_PROMPT)
+        self.assertIn("short natural sentences", agent.VOICE_SYSTEM_PROMPT)
+        self.assertIn("Be warm, not robotic", agent.VOICE_SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

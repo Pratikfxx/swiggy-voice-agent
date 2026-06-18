@@ -98,6 +98,8 @@ _el_failures = 0
 _el_disabled_until = 0.0
 _EL_MAX_FAILURES = 3
 _EL_BACKOFF_SECS = 300
+DEFAULT_GATHER_TIMEOUT = 7
+SILENCE_REPROMPT = "I didn't catch that. Say the item again, or say cancel."
 
 
 def get_base_url() -> str:
@@ -178,7 +180,7 @@ async def make_twiml_response(
     agent_text: str,
     session_id: str,
     is_final: bool = False,
-    gather_timeout: int = 4
+    gather_timeout: int = DEFAULT_GATHER_TIMEOUT
 ) -> str:
     """
     Build TwiML response that speaks agent_text then either:
@@ -217,9 +219,17 @@ async def make_twiml_response(
             gather.say(spoken_text, voice="Polly.Aditi", language="en-IN")
         vr.append(gather)
 
-        # If user doesn't speak within timeout — hang up cleanly (no repeat loop)
-        vr.say("No problem, call back anytime you're hungry. Goodbye!", voice="Polly.Aditi", language="en-IN")
-        vr.hangup()
+        retry_gather = Gather(
+            input="speech",
+            action=f"{base}/voice/process",
+            method="POST",
+            timeout=gather_timeout,
+            speech_timeout="auto",
+            language="en-IN",
+            hints=SPEECH_HINTS,
+        )
+        retry_gather.say(SILENCE_REPROMPT, voice="Polly.Aditi", language="en-IN")
+        vr.append(retry_gather)
 
     return str(vr)
 
@@ -322,7 +332,7 @@ async def voice_process(request: Request):
         agent_text=agent_response,
         session_id=call_sid,
         is_final=final,
-        gather_timeout=4
+        gather_timeout=DEFAULT_GATHER_TIMEOUT
     )
     return Response(content=twiml, media_type="application/xml")
 
