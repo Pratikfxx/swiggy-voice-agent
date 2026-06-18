@@ -547,10 +547,6 @@ def _api_timeout_for(surface):
     return VOICE_API_TIMEOUT_SECS if surface == "voice" else CHAT_API_TIMEOUT_SECS
 
 
-def _api_speed_for(surface):
-    return "fast" if surface == "voice" else "standard"
-
-
 def _live_order_summary(tool_name: str, tool_input: dict) -> tuple[str, str, list, str, float]:
     if not isinstance(tool_input, dict):
         tool_input = {}
@@ -764,7 +760,6 @@ def _run_agent_live(
                 betas=["mcp-client-2025-11-20"],
                 messages=messages,
                 timeout=_api_timeout_for(surface),
-                speed=_api_speed_for(surface),
             )
             messages.append({"role": "assistant", "content": response.content})
 
