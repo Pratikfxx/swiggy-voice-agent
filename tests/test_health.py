@@ -34,6 +34,30 @@ def _fresh_main():
 
 
 class HealthTests(unittest.TestCase):
+    def test_health_requires_only_active_instamart_token_for_readiness(self):
+        env = {
+            "DEMO_MODE": "false",
+            "ANTHROPIC_API_KEY": "test-key",
+            "TWILIO_ACCOUNT_SID": "AC" + "1" * 32,
+            "TWILIO_AUTH_TOKEN": "test-token",
+            "ELEVENLABS_API_KEY": "test-eleven",
+            "SWIGGY_IM_TOKEN": _jwt({"exp": 1300}),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            token_store = os.path.join(tmpdir, ".swiggy_tokens.json")
+            with patch.dict(os.environ, env, clear=True):
+                main = _fresh_main()
+                with patch.object(swiggy_auth, "TOKEN_STORE", token_store):
+                    with patch.object(swiggy_auth.time, "time", return_value=1000):
+                        result = main.health()
+
+        self.assertTrue(result["swiggy"])
+        self.assertEqual(result["swiggy_required_tokens"], ["im"])
+        self.assertFalse(result["swiggy_tokens"]["im"]["expired"])
+        self.assertFalse(result["swiggy_tokens"]["food"]["logged_in"])
+        self.assertFalse(result["swiggy_tokens"]["dineout"]["logged_in"])
+
     def test_health_reports_swiggy_ready_from_safe_token_status(self):
         env = {
             "DEMO_MODE": "false",

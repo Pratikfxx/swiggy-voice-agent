@@ -303,17 +303,25 @@ def get_access_token(key: str) -> str:
     return new_access_token
 
 
-def get_all_access_tokens() -> dict[str, str]:
+def get_access_tokens(keys: tuple[str, ...] | list[str] | None = None) -> dict[str, str]:
+    selected_keys = tuple(keys) if keys is not None else tuple(RESOURCES)
+    for key in selected_keys:
+        _validate_key(key)
+
     store = _load_store()
     missing = [
         key
-        for key in RESOURCES
+        for key in selected_keys
         if not os.environ.get(ENV_TOKEN_VARS[key]) and key not in store
     ]
     if missing:
         names = ", ".join(missing)
         raise RuntimeError(f"Missing Swiggy MCP login for: {names}")
-    return {key: get_access_token(key) for key in RESOURCES}
+    return {key: get_access_token(key) for key in selected_keys}
+
+
+def get_all_access_tokens() -> dict[str, str]:
+    return get_access_tokens(tuple(RESOURCES))
 
 
 def _env_token_expiry(token: str, now: float) -> tuple[int | None, bool]:

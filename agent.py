@@ -19,7 +19,13 @@ import anthropic
 from recipe_engine import get_recipe_ingredients as _get_recipe_ingredients
 from order_history import save_order, get_recent_orders
 import swiggy_address
-from swiggy_auth import get_all_access_tokens
+from swiggy_auth import get_access_tokens
+from swiggy_scope import (
+    ACTIVE_SWIGGY_SERVERS,
+    ACTIVE_TOKEN_KEYS,
+    SERVER_AUTH_KEYS as MCP_AUTH_KEYS,
+    SWIGGY_SERVER_URLS as SWIGGY_SERVERS,
+)
 from swiggy_tools import (
     get_saved_address,
     search_food_restaurants,
@@ -46,21 +52,22 @@ CONFIRM_RE = re.compile(
     re.I,
 )
 
-SWIGGY_SERVERS = {
-    "swiggy-food": "https://mcp.swiggy.com/food",
-    "swiggy-instamart": "https://mcp.swiggy.com/im",
-    "swiggy-dineout": "https://mcp.swiggy.com/dineout",
-}
-MCP_AUTH_KEYS = {
-    "swiggy-food": "food",
-    "swiggy-instamart": "im",
-    "swiggy-dineout": "dineout",
-}
 SPEND_TOOLS = {
     "swiggy-food": ["place_food_order"],
     "swiggy-instamart": ["checkout"],
     "swiggy-dineout": ["book_table"],
 }
+LIVE_AUTH_NOT_READY_MESSAGE = (
+    "Swiggy login is not ready for Instamart yet. "
+    "Please refresh the Instamart login and try again."
+)
+LIVE_CHECKOUT_UNCERTAIN_MESSAGE = (
+    "I couldn't confirm the checkout status. "
+    "Please check your Swiggy app order history before trying again."
+)
+LIVE_GENERIC_FAILURE_MESSAGE = (
+    "Sorry, I hit a problem reaching Swiggy. Please try again in a moment."
+)
 
 
 def _route_servers(user_message: str, surface: str) -> list[str]:
@@ -68,7 +75,7 @@ def _route_servers(user_message: str, surface: str) -> list[str]:
 
     Product mode is temporarily Instamart-only, so do not attach Food or Dineout.
     """
-    return ["swiggy-instamart"]
+    return list(ACTIVE_SWIGGY_SERVERS)
 
 
 def _is_confirmation(text):
@@ -803,7 +810,9 @@ def _run_agent_live(
 
     except Exception:
         logging.exception("Swiggy live agent failed")
-        return "Sorry, I hit a problem reaching Swiggy. Please try again in a moment.", messages
+        if _is_confirmation(user_message):
+            return LIVE_CHECKOUT_UNCERTAIN_MESSAGE, messages
+        return LIVE_GENERIC_FAILURE_MESSAGE, messages
 
 
 def run_agent(
@@ -827,10 +836,14 @@ def run_agent(
         return _run_agent_demo(user_message, conversation_history, surface, session_id)
 
     try:
-        tokens = get_all_access_tokens()
+        tokens = get_access_tokens(ACTIVE_TOKEN_KEYS)
     except Exception as e:
-        logging.warning("Swiggy not authed, falling back to demo: %s", e)
-        return _run_agent_demo(user_message, conversation_history, surface, session_id)
+        logging.warning("Swiggy live auth not ready: %s", e)
+        messages = conversation_history + [
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": LIVE_AUTH_NOT_READY_MESSAGE},
+        ]
+        return LIVE_AUTH_NOT_READY_MESSAGE, messages
 
     return _run_agent_live(user_message, conversation_history, surface, session_id, tokens)
 

@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 
 import swiggy_auth
 import swiggy_address
+from swiggy_scope import ACTIVE_TOKEN_KEYS
 from voice_handler import router as voice_router
 from whatsapp_handler import router as whatsapp_router
 
@@ -48,8 +49,9 @@ def health():
     try:
         swiggy_tokens = swiggy_auth.status()
         swiggy_ready = all(
-            info.get("logged_in") and not info.get("expired", False)
-            for info in swiggy_tokens.values()
+            swiggy_tokens.get(key, {}).get("logged_in")
+            and not swiggy_tokens.get(key, {}).get("expired", False)
+            for key in ACTIVE_TOKEN_KEYS
         )
     except Exception as exc:
         logging.exception("swiggy auth health failed")
@@ -63,6 +65,7 @@ def health():
         "twilio": bool(os.getenv("TWILIO_ACCOUNT_SID")),
         "elevenlabs": bool(os.getenv("ELEVENLABS_API_KEY")),
         "swiggy": swiggy_ready,
+        "swiggy_required_tokens": list(ACTIVE_TOKEN_KEYS),
         "swiggy_tokens": swiggy_tokens,
     }
 

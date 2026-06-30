@@ -17,6 +17,15 @@ def _jwt(payload):
 
 
 class SwiggyAuthStatusTests(unittest.TestCase):
+    def test_get_access_tokens_can_require_only_instamart(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            token_store = os.path.join(tmpdir, ".swiggy_tokens.json")
+            with patch.dict(os.environ, {"SWIGGY_IM_TOKEN": "im-token"}, clear=True):
+                with patch.object(swiggy_auth, "TOKEN_STORE", token_store):
+                    result = swiggy_auth.get_access_tokens(("im",))
+
+        self.assertEqual(result, {"im": "im-token"})
+
     def test_env_jwt_status_reports_expiry_without_token_value(self):
         token = _jwt({"exp": 1120})
 

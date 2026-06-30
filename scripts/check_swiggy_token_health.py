@@ -13,7 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-EXPECTED_KEYS = ("food", "im", "dineout")
+from swiggy_scope import ACTIVE_TOKEN_KEYS
+
+
+EXPECTED_KEYS = ACTIVE_TOKEN_KEYS
 
 
 def _format_duration(seconds: int | None) -> str:
@@ -24,14 +27,18 @@ def _format_duration(seconds: int | None) -> str:
     return f"{hours}h{minutes:02d}m"
 
 
-def evaluate_health(payload: dict[str, Any], warn_seconds: int) -> int:
+def evaluate_health(
+    payload: dict[str, Any],
+    warn_seconds: int,
+    expected_keys: tuple[str, ...] | list[str] = EXPECTED_KEYS,
+) -> int:
     tokens = payload.get("swiggy_tokens")
     if not isinstance(tokens, dict):
         print("swiggy_tokens: failed missing")
         return 2
 
     exit_code = 0
-    for key in EXPECTED_KEYS:
+    for key in expected_keys:
         info = tokens.get(key)
         if not isinstance(info, dict):
             print(f"{key}: failed missing")
@@ -70,6 +77,13 @@ def _load_local_health() -> dict[str, Any]:
     return {"swiggy_tokens": swiggy_auth.status()}
 
 
+def _parse_keys(raw: str) -> tuple[str, ...]:
+    keys = tuple(key.strip() for key in raw.split(",") if key.strip())
+    if not keys:
+        raise ValueError("At least one Swiggy token key is required")
+    return keys
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check Swiggy token expiry safely")
     parser.add_argument(
@@ -83,11 +97,17 @@ def main(argv: list[str] | None = None) -> int:
         default=float(os.getenv("SWIGGY_TOKEN_WARN_HOURS", "24")),
         help="Return warning when any token expires within this many hours.",
     )
+    parser.add_argument(
+        "--keys",
+        default=os.getenv("SWIGGY_TOKEN_KEYS", ",".join(EXPECTED_KEYS)),
+        help="Comma-separated Swiggy token keys to require. Defaults to active product scope.",
+    )
     args = parser.parse_args(argv)
 
     warn_seconds = int(args.warn_hours * 3600)
+    expected_keys = _parse_keys(args.keys)
     payload = _load_remote_health(args.url) if args.url else _load_local_health()
-    return evaluate_health(payload, warn_seconds=warn_seconds)
+    return evaluate_health(payload, warn_seconds=warn_seconds, expected_keys=expected_keys)
 
 
 if __name__ == "__main__":
