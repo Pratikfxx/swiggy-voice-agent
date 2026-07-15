@@ -9,6 +9,8 @@ Setup:
   - Production: WhatsApp Business number via Twilio
 """
 
+import asyncio
+import logging
 import os
 import base64
 import httpx
@@ -29,6 +31,10 @@ TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 
 twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+wa_logger = logging.getLogger("uvicorn.error")
+
+# Keep strong refs to in-flight background tasks so they aren't GC'd mid-run
+_background_tasks: set[asyncio.Task] = set()
 
 
 async def transcribe_voice_note(media_url: str, media_content_type: str) -> str:
@@ -171,7 +177,8 @@ async def analyze_fridge_image(media_url: str) -> list[str]:
         image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
 
         _client = _anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-        message = _client.messages.create(
+        message = await asyncio.to_thread(
+            _client.messages.create,
             model="claude-haiku-4-5-20251001",
             max_tokens=512,
             messages=[
@@ -222,11 +229,17 @@ def send_whatsapp_message(to: str, body: str) -> None:
     )
 
 
+async def _send(to: str, body: str) -> None:
+    """Async wrapper — Twilio REST call is blocking, keep it off the event loop."""
+    await asyncio.to_thread(send_whatsapp_message, to, body)
+
+
 @router.post("/webhook")
 async def whatsapp_webhook(request: Request):
     """
-    Main WhatsApp webhook — handles all incoming messages.
-    Twilio sends form data with message details.
+    Main WhatsApp webhook — parse the form, ack Twilio immediately, and handle
+    the message in a background task. Agent turns can outlive Twilio's webhook
+    timeout, and a timed-out webhook gets retried (double processing).
     """
     form = await request.form()
 
@@ -236,20 +249,52 @@ async def whatsapp_webhook(request: Request):
     media_url = form.get("MediaUrl0", "")
     media_content_type = form.get("MediaContentType0", "")
 
+    task = asyncio.create_task(
+        _handle_incoming(from_number, body, num_media, media_url, media_content_type)
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return Response(status_code=200)
+
+
+async def _handle_incoming(
+    from_number: str,
+    body: str,
+    num_media: int,
+    media_url: str,
+    media_content_type: str,
+) -> None:
+    try:
+        await _handle_incoming_inner(from_number, body, num_media, media_url, media_content_type)
+    except Exception:
+        wa_logger.exception("WhatsApp handling failed from=%s", from_number)
+        try:
+            await _send(from_number, "Sorry, something went wrong. Please try again.")
+        except Exception:
+            wa_logger.exception("WhatsApp error reply failed from=%s", from_number)
+
+
+async def _handle_incoming_inner(
+    from_number: str,
+    body: str,
+    num_media: int,
+    media_url: str,
+    media_content_type: str,
+) -> None:
     session_id = from_number  # phone number as session key
 
     # ── Handle fridge/pantry photo ───────────────────────────────────────────
     if num_media > 0 and "image" in media_content_type:
-        send_whatsapp_message(from_number, "📸 Scanning your fridge... give me a sec!")
+        await _send(from_number, "📸 Scanning your fridge... give me a sec!")
         items = await analyze_fridge_image(media_url)
 
         if not items:
-            send_whatsapp_message(
+            await _send(
                 from_number,
                 "Hmm, I couldn't make out food items in that photo. "
                 "Try a clearer shot of your fridge or pantry shelves!"
             )
-            return Response(status_code=200)
+            return
 
         # Store inventory in session so agent can reference it
         history = get_session(session_id)
@@ -271,33 +316,33 @@ async def whatsapp_webhook(request: Request):
         update_session(session_id, history)
 
         item_list = "\n".join(f"  • {i}" for i in items)
-        send_whatsapp_message(
+        await _send(
             from_number,
             f"✅ *Fridge scanned!* I can see:\n{item_list}\n\n"
             f"Next time you ask for recipe ingredients, I'll only order what's *missing* from this list. 🛒"
         )
-        return Response(status_code=200)
+        return
 
     # ── Handle voice notes ────────────────────────────────────────────────────
     if num_media > 0 and "audio" in media_content_type:
         # Immediate ack so user knows we received it (transcription takes 1–3s)
-        send_whatsapp_message(from_number, "🎤 Got your voice note, transcribing...")
+        await _send(from_number, "🎤 Got your voice note, transcribing...")
 
         body = await transcribe_voice_note(media_url, media_content_type)
 
         if not body:
-            send_whatsapp_message(
+            await _send(
                 from_number,
                 "Sorry, I couldn't make that out. Could you send it again or type your order?"
             )
-            return Response(status_code=200)
+            return
 
         # Echo back what was understood so the user can catch mis-transcriptions
-        send_whatsapp_message(from_number, f'_Heard: "{body}"_')
+        await _send(from_number, f'_Heard: "{body}"_')
 
     # Handle empty messages
     if not body:
-        send_whatsapp_message(
+        await _send(
             from_number,
             "👋 Hi! I'm Swiggy's ordering assistant.\n\n"
             "Just tell me what you want:\n"
@@ -306,11 +351,11 @@ async def whatsapp_webhook(request: Request):
             "• *Items for alfredo pasta* — I'll get all the ingredients\n\n"
             "What would you like today?"
         )
-        return Response(status_code=200)
+        return
 
     # Special commands
     if body.lower() in ["hi", "hello", "hey", "start", "help"]:
-        send_whatsapp_message(
+        await _send(
             from_number,
             "👋 *Hey! I'm Swiggy.* Ready to order?\n\n"
             "Try:\n"
@@ -320,15 +365,15 @@ async def whatsapp_webhook(request: Request):
             "• _Order pizza under ₹300_\n\n"
             "Just speak naturally — I'll handle the rest! 🍛"
         )
-        return Response(status_code=200)
+        return
 
-    # Run agent
-    agent_response = process_message(
+    # Run agent — blocking call, keep it off the event loop
+    agent_response = await asyncio.to_thread(
+        process_message,
         session_id=session_id,
         user_message=body,
-        surface="chat"
+        surface="chat",
     )
 
     # Send response
-    send_whatsapp_message(from_number, agent_response)
-    return Response(status_code=200)
+    await _send(from_number, agent_response)

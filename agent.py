@@ -39,10 +39,18 @@ from swiggy_tools import (
 )
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-AGENT_MODEL = os.getenv("AGENT_MODEL", "claude-sonnet-4-6")
+# Chat/WhatsApp brain: Claude Fable 5. Voice stays on Haiku — a live phone call
+# cannot absorb Fable-length turns inside the 7s API deadline.
+AGENT_MODEL = os.getenv("AGENT_MODEL", "claude-fable-5")
+# Fable 5 safety classifiers can decline benign requests; server-side fallback
+# reruns the same request on Opus in the same call. Empty string disables.
+AGENT_FALLBACK_MODEL = os.getenv("AGENT_FALLBACK_MODEL", "claude-opus-4-8")
+CHAT_EFFORT = os.getenv("CHAT_EFFORT", "low")
 VOICE_MODEL = os.getenv("VOICE_MODEL", "claude-haiku-4-5")
 VOICE_API_TIMEOUT_SECS = float(os.getenv("VOICE_API_TIMEOUT_SECS", "7.0"))
-CHAT_API_TIMEOUT_SECS = float(os.getenv("CHAT_API_TIMEOUT_SECS", "30.0"))
+CHAT_API_TIMEOUT_SECS = float(os.getenv("CHAT_API_TIMEOUT_SECS", "60.0"))
+# Fable's always-on thinking counts against max_tokens, so chat needs headroom.
+CHAT_MAX_TOKENS = int(os.getenv("CHAT_MAX_TOKENS", "4096"))
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 DEFAULT_ADDRESS_ID = os.getenv("DEFAULT_ADDRESS_ID", "")
 DEFAULT_ADDRESS_LABEL = os.getenv("DEFAULT_ADDRESS_LABEL", "Home")
@@ -67,6 +75,10 @@ LIVE_CHECKOUT_UNCERTAIN_MESSAGE = (
 )
 LIVE_GENERIC_FAILURE_MESSAGE = (
     "Sorry, I hit a problem reaching Swiggy. Please try again in a moment."
+)
+REFUSAL_MESSAGE = (
+    "Sorry, I can't help with that request. "
+    "Want groceries, snacks, drinks, or essentials instead?"
 )
 
 
@@ -546,8 +558,29 @@ def _model_for(surface):
     return VOICE_MODEL if surface == "voice" else AGENT_MODEL
 
 
+def _is_fable(model: str) -> bool:
+    return model.startswith(("claude-fable", "claude-mythos"))
+
+
+def _fable_chat_kwargs(surface: str, live: bool) -> tuple[dict, list[str]]:
+    """Fable-only request extras for the chat surface.
+
+    Returns (extra kwargs, extra beta flags). Effort is GA and works on both
+    endpoints; server-side fallbacks need the beta messages endpoint, so they
+    only apply on the live path.
+    """
+    if surface == "voice" or not _is_fable(_model_for(surface)):
+        return {}, []
+    extras: dict = {"output_config": {"effort": CHAT_EFFORT}}
+    betas: list[str] = []
+    if live and AGENT_FALLBACK_MODEL:
+        extras["fallbacks"] = [{"model": AGENT_FALLBACK_MODEL}]
+        betas.append("server-side-fallback-2026-06-01")
+    return extras, betas
+
+
 def _max_tokens_for(surface):
-    return 400 if surface == "voice" else 1024
+    return 400 if surface == "voice" else CHAT_MAX_TOKENS
 
 
 def _api_timeout_for(surface):
@@ -668,6 +701,9 @@ def _run_agent_demo(
 ) -> tuple[str, list[dict]]:
     system_prompt = VOICE_SYSTEM_PROMPT if surface == "voice" else CHAT_SYSTEM_PROMPT
     messages = conversation_history + [{"role": "user", "content": user_message}]
+    fable_kwargs, _ = _fable_chat_kwargs(surface, live=False)
+    # fallbacks need the beta endpoint — demo mode stays on the regular one
+    fable_kwargs.pop("fallbacks", None)
 
     for _ in range(8):
         response = client.messages.create(
@@ -677,7 +713,11 @@ def _run_agent_demo(
             tools=TOOLS,
             messages=messages,
             timeout=_api_timeout_for(surface),
+            **fable_kwargs,
         )
+        if response.stop_reason == "refusal":
+            messages.append({"role": "assistant", "content": REFUSAL_MESSAGE})
+            return REFUSAL_MESSAGE, messages
         text_blocks = [b.text for b in response.content if hasattr(b, "text")]
         tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
         messages.append({"role": "assistant", "content": response.content})
@@ -756,7 +796,9 @@ def _run_agent_live(
             for name in active
         ]
         tools.extend(LIVE_LOCAL_TOOLS)
+        fable_kwargs, fable_betas = _fable_chat_kwargs(surface, live=True)
 
+        response = None
         for _ in range(8):
             response = client.beta.messages.create(
                 model=_model_for(surface),
@@ -764,9 +806,10 @@ def _run_agent_live(
                 system=system_prompt,
                 tools=tools,
                 mcp_servers=mcp_servers,
-                betas=["mcp-client-2025-11-20"],
+                betas=["mcp-client-2025-11-20"] + fable_betas,
                 messages=messages,
                 timeout=_api_timeout_for(surface),
+                **fable_kwargs,
             )
             messages.append({"role": "assistant", "content": response.content})
 
@@ -799,6 +842,12 @@ def _run_agent_live(
                 continue
             assistant_blocks.extend(content or [])
         _save_live_order_if_any(assistant_blocks, session_id)
+
+        # Whole-chain refusal (Fable declined and fallback declined too, or no
+        # fallback configured) — content is empty or partial, don't read it.
+        if response is not None and response.stop_reason == "refusal":
+            messages.append({"role": "assistant", "content": REFUSAL_MESSAGE})
+            return REFUSAL_MESSAGE, messages
 
         final_text = ""
         for message in reversed(messages):
