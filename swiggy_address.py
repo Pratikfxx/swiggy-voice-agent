@@ -9,9 +9,14 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from swiggy_auth import get_access_token
+from swiggy_scope import ACTIVE_SWIGGY_SERVERS, SERVER_AUTH_KEYS, SWIGGY_SERVER_URLS
 
 
-FOOD_URL = "https://mcp.swiggy.com/food"
+# Fetch addresses through an active-scope server — a token for an inactive
+# scope (e.g. food while the product is Instamart-only) goes stale unnoticed.
+_ADDRESS_SERVER = ACTIVE_SWIGGY_SERVERS[0]
+ADDRESS_URL = SWIGGY_SERVER_URLS[_ADDRESS_SERVER]
+ADDRESS_TOKEN_KEY = SERVER_AUTH_KEYS[_ADDRESS_SERVER]
 TTL = int(os.getenv("DEFAULT_ADDR_TTL", "600"))
 
 _cache = {"addr": None, "ts": 0.0}
@@ -59,9 +64,9 @@ def _parse_addresses_result(result) -> dict | None:
 
 async def fetch_default_address() -> dict | None:
     try:
-        token = get_access_token("food")
+        token = get_access_token(ADDRESS_TOKEN_KEY)
         async with streamablehttp_client(
-            FOOD_URL,
+            ADDRESS_URL,
             headers={"Authorization": f"Bearer {token}"},
         ) as (read, write, _):
             async with ClientSession(read, write) as session:
