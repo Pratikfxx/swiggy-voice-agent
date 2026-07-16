@@ -635,6 +635,48 @@ def _create_message(surface: str, live: bool, **kwargs):
         return attempt(fallback)
 
 
+def _system_blocks(system_prompt: str) -> list[dict]:
+    """System prompt as a cacheable block.
+
+    The prompt prefix renders tools -> system -> messages, so a cache
+    breakpoint on the last system block caches the tool schemas (including the
+    ~30k tokens of Swiggy MCP toolsets) together with the prompt. Cache reads
+    bill at ~0.1x, and that prefix is nearly all of our per-turn input.
+
+    Note: the confirmation turn flips the checkout tool's enabled flag, which
+    changes the tools tier and writes a second cache variant. Both variants
+    stay warm within the 5-minute TTL, so an order flow still hits cache on
+    every turn except the first of each variant.
+    """
+    return [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
+
+
+def _with_history_breakpoint(messages: list[dict]) -> list[dict]:
+    """Mark the newest message as a cache breakpoint (non-destructively).
+
+    The system-block breakpoint caches tools+system, but conversation history
+    sits after it and was replaying at full price every call — measured 11.5k
+    full-price tokens on turn two of a chat. A breakpoint on the last message
+    block lets each request reuse the previous request's entire prefix.
+    """
+    if not messages:
+        return messages
+
+    last = messages[-1]
+    if not isinstance(last, dict):
+        return messages
+
+    content = last.get("content")
+    if isinstance(content, str):
+        marked = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+    elif isinstance(content, list) and content and isinstance(content[-1], dict):
+        marked = content[:-1] + [{**content[-1], "cache_control": {"type": "ephemeral"}}]
+    else:
+        return messages
+
+    return messages[:-1] + [{**last, "content": marked}]
+
+
 def _max_tokens_for(surface):
     return 400 if surface == "voice" else CHAT_MAX_TOKENS
 
@@ -763,7 +805,7 @@ def _run_agent_demo(
             surface,
             live=False,
             max_tokens=_max_tokens_for(surface),
-            system=system_prompt,
+            system=_system_blocks(system_prompt),
             tools=TOOLS,
             messages=messages,
             timeout=_api_timeout_for(surface),
@@ -862,11 +904,11 @@ def _run_agent_live(
                 surface,
                 live=True,
                 max_tokens=_max_tokens_for(surface),
-                system=system_prompt,
+                system=_system_blocks(system_prompt),
                 tools=tools,
                 mcp_servers=mcp_servers,
                 betas=["mcp-client-2025-11-20"],
-                messages=messages,
+                messages=_with_history_breakpoint(messages),
                 timeout=_api_timeout_for(surface),
             )
             messages.append({"role": "assistant", "content": response.content})

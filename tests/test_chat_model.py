@@ -214,7 +214,39 @@ class ChatModelConfigTests(unittest.TestCase):
             response, _ = agent._run_agent_live("milk", [], "voice", "call-t", {"im": "t"})
 
         blocking.assert_called_once()
-        self.assertIn("DEFAULT DELIVERY ADDRESS: Ghar (Nagpur), addressId addr9", captured["system"])
+        system_text = "".join(b["text"] for b in captured["system"])
+        self.assertIn("DEFAULT DELIVERY ADDRESS: Ghar (Nagpur), addressId addr9", system_text)
+
+    def test_system_prompt_is_cacheable_block(self):
+        """One breakpoint on the system block caches tools+system (~30k tokens/turn)."""
+        agent = _fresh_agent({"DEMO_MODE": "false"})
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return FakeResponse()
+
+        with (
+            patch.object(agent.client.beta.messages, "create", side_effect=fake_create),
+            patch.object(agent.swiggy_address, "maybe_background_refresh"),
+            patch.object(agent.swiggy_address, "get_cached_default", return_value={"id": "a1", "label": "Home", "area": "X"}),
+        ):
+            agent._run_agent_live("milk", [], "chat", "wa-t", {"im": "t"})
+
+        self.assertEqual(captured["system"][-1]["cache_control"], {"type": "ephemeral"})
+
+    def test_demo_system_prompt_is_cacheable_block(self):
+        agent = _fresh_agent()
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return FakeResponse()
+
+        with patch.object(agent.client.messages, "create", side_effect=fake_create):
+            agent._run_agent_demo("milk", [], surface="chat", session_id="wa-t")
+
+        self.assertEqual(captured["system"][-1]["cache_control"], {"type": "ephemeral"})
 
     def test_warm_address_cache_skips_blocking_fetch(self):
         agent = _fresh_agent({"DEMO_MODE": "false"})
