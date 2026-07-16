@@ -31,18 +31,18 @@ class FakeRefusalResponse:
     stop_reason = "refusal"
 
 
-class FableModelConfigTests(unittest.TestCase):
-    def test_chat_defaults_to_fable_voice_stays_haiku(self):
+class ChatModelConfigTests(unittest.TestCase):
+    def test_chat_defaults_to_sonnet_voice_stays_haiku(self):
         agent = _fresh_agent()
-        self.assertEqual(agent._model_for("chat"), "claude-fable-5")
+        self.assertEqual(agent._model_for("chat"), "claude-sonnet-5")
         self.assertEqual(agent._model_for("voice"), "claude-haiku-4-5")
 
-    def test_chat_gets_more_output_headroom_than_voice(self):
+    def test_chat_max_tokens_modest_voice_smaller(self):
         agent = _fresh_agent()
         self.assertEqual(agent._max_tokens_for("voice"), 400)
-        self.assertGreaterEqual(agent._max_tokens_for("chat"), 4096)
+        self.assertEqual(agent._max_tokens_for("chat"), 1024)
 
-    def test_demo_chat_sets_effort_but_no_fallbacks(self):
+    def test_demo_chat_disables_thinking_to_save_tokens(self):
         agent = _fresh_agent()
         captured = {}
 
@@ -54,12 +54,12 @@ class FableModelConfigTests(unittest.TestCase):
             response, _ = agent._run_agent_demo("milk", [], surface="chat", session_id="wa-test")
 
         self.assertEqual(response, "ok")
-        self.assertEqual(captured["model"], "claude-fable-5")
-        self.assertEqual(captured["output_config"], {"effort": agent.CHAT_EFFORT})
+        self.assertEqual(captured["model"], "claude-sonnet-5")
+        self.assertEqual(captured["thinking"], {"type": "disabled"})
         self.assertNotIn("fallbacks", captured)
-        self.assertNotIn("betas", captured)
+        self.assertNotIn("output_config", captured)
 
-    def test_demo_voice_has_no_fable_extras(self):
+    def test_demo_voice_has_no_thinking_param(self):
         agent = _fresh_agent()
         captured = {}
 
@@ -72,10 +72,9 @@ class FableModelConfigTests(unittest.TestCase):
 
         self.assertEqual(response, "ok")
         self.assertEqual(captured["model"], "claude-haiku-4-5")
-        self.assertNotIn("output_config", captured)
-        self.assertNotIn("fallbacks", captured)
+        self.assertNotIn("thinking", captured)
 
-    def test_live_chat_includes_fallbacks_and_effort(self):
+    def test_live_chat_disables_thinking_no_fallback(self):
         agent = _fresh_agent({"DEMO_MODE": "false"})
         captured = {}
 
@@ -91,13 +90,12 @@ class FableModelConfigTests(unittest.TestCase):
             response, _ = agent._run_agent_live("milk", [], "chat", "wa-test", {"im": "t"})
 
         self.assertEqual(response, "ok")
-        self.assertEqual(captured["model"], "claude-fable-5")
-        self.assertEqual(captured["output_config"], {"effort": agent.CHAT_EFFORT})
-        self.assertEqual(captured["fallbacks"], [{"model": "claude-opus-4-8"}])
-        self.assertIn("mcp-client-2025-11-20", captured["betas"])
-        self.assertIn("server-side-fallback-2026-06-01", captured["betas"])
+        self.assertEqual(captured["model"], "claude-sonnet-5")
+        self.assertEqual(captured["thinking"], {"type": "disabled"})
+        self.assertEqual(captured["betas"], ["mcp-client-2025-11-20"])
+        self.assertNotIn("fallbacks", captured)
 
-    def test_live_voice_excludes_fable_extras(self):
+    def test_live_voice_no_thinking_param(self):
         agent = _fresh_agent({"DEMO_MODE": "false"})
         captured = {}
 
@@ -114,16 +112,18 @@ class FableModelConfigTests(unittest.TestCase):
 
         self.assertEqual(response, "ok")
         self.assertEqual(captured["model"], "claude-haiku-4-5")
-        self.assertNotIn("output_config", captured)
-        self.assertNotIn("fallbacks", captured)
+        self.assertNotIn("thinking", captured)
         self.assertEqual(captured["betas"], ["mcp-client-2025-11-20"])
 
-    def test_fallback_can_be_disabled_via_env(self):
-        agent = _fresh_agent({"DEMO_MODE": "false", "AGENT_FALLBACK_MODEL": ""})
-        extras, betas = agent._fable_chat_kwargs("chat", live=True)
-        self.assertNotIn("fallbacks", extras)
-        self.assertEqual(betas, [])
-        self.assertEqual(extras["output_config"], {"effort": agent.CHAT_EFFORT})
+    def test_thinking_can_be_re_enabled_via_env(self):
+        agent = _fresh_agent({"CHAT_THINKING": "adaptive"})
+        self.assertEqual(
+            agent._chat_thinking_kwargs("chat"), {"thinking": {"type": "adaptive"}}
+        )
+
+    def test_invalid_thinking_value_is_ignored(self):
+        agent = _fresh_agent({"CHAT_THINKING": "garbage"})
+        self.assertEqual(agent._chat_thinking_kwargs("chat"), {})
 
     def test_demo_refusal_returns_safe_message(self):
         agent = _fresh_agent()

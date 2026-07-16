@@ -51,11 +51,10 @@ DEMO_MODE=true
 BASE_URL=http://localhost:8000   # update after deploy
 
 # Models (optional — these are the defaults)
-AGENT_MODEL=claude-fable-5             # chat/WhatsApp brain (needs 30-day data retention on your Anthropic org)
-AGENT_FALLBACK_MODEL=claude-opus-4-8   # reruns the request if Fable's safety classifiers decline; set empty to disable
-VOICE_MODEL=claude-haiku-4-5           # live phone calls — keep this fast
-CHAT_EFFORT=low                        # Fable effort for chat: low keeps replies snappy
-CHAT_MAX_TOKENS=4096                   # Fable's thinking counts against this cap
+AGENT_MODEL=claude-sonnet-5            # chat/WhatsApp brain — best value/quality for ordering
+VOICE_MODEL=claude-haiku-4-5           # live phone calls — cheapest + fastest
+CHAT_THINKING=disabled                 # Sonnet 5 thinks by default; disabled saves tokens. "adaptive" re-enables
+CHAT_MAX_TOKENS=1024                   # per-reply output cap for chat
 ```
 
 ---
