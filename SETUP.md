@@ -54,6 +54,7 @@ BASE_URL=http://localhost:8000   # update after deploy
 AGENT_MODEL=claude-sonnet-5            # chat/WhatsApp brain — best value/quality for ordering
 VOICE_MODEL=claude-haiku-4-5           # live phone calls — cheapest + fastest
 CHAT_THINKING=disabled                 # Sonnet 5 thinks by default; disabled saves tokens. "adaptive" re-enables
+VOICE_THINKING=disabled                # same for voice — worth ~12s per turn on a live call
 CHAT_MAX_TOKENS=1024                   # per-reply output cap for chat
 ```
 

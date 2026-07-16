@@ -118,12 +118,29 @@ class ChatModelConfigTests(unittest.TestCase):
     def test_thinking_can_be_re_enabled_via_env(self):
         agent = _fresh_agent({"CHAT_THINKING": "adaptive"})
         self.assertEqual(
-            agent._chat_thinking_kwargs("chat"), {"thinking": {"type": "adaptive"}}
+            agent._thinking_kwargs("chat"), {"thinking": {"type": "adaptive"}}
         )
 
     def test_invalid_thinking_value_is_ignored(self):
         agent = _fresh_agent({"CHAT_THINKING": "garbage"})
-        self.assertEqual(agent._chat_thinking_kwargs("chat"), {})
+        self.assertEqual(agent._thinking_kwargs("chat"), {})
+
+    def test_voice_on_sonnet_disables_thinking(self):
+        """Worth ~12s a turn on a live call — and voice may run Sonnet when Haiku is overloaded."""
+        agent = _fresh_agent({"VOICE_MODEL": "claude-sonnet-5"})
+        self.assertEqual(
+            agent._thinking_kwargs("voice"), {"thinking": {"type": "disabled"}}
+        )
+
+    def test_haiku_never_gets_a_thinking_param(self):
+        """Haiku does not think when the param is omitted; sending an unsupported switch would fail the call."""
+        agent = _fresh_agent({"VOICE_MODEL": "claude-haiku-4-5"})
+        self.assertEqual(agent._thinking_kwargs("voice"), {})
+
+    def test_fable_never_gets_a_thinking_param(self):
+        """Thinking is always on for Fable; any override is rejected with a 400."""
+        agent = _fresh_agent({"AGENT_MODEL": "claude-fable-5"})
+        self.assertEqual(agent._thinking_kwargs("chat"), {})
 
     def test_demo_refusal_returns_safe_message(self):
         agent = _fresh_agent()

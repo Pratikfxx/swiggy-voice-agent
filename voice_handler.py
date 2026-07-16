@@ -118,8 +118,14 @@ _el_disabled_reason = ""
 _EL_MAX_FAILURES = 3
 _EL_BACKOFF_SECS = 300
 DEFAULT_GATHER_TIMEOUT = 7
-VOICE_AGENT_TIMEOUT_SECS = float(os.getenv("VOICE_AGENT_TIMEOUT_SECS", "16.0"))
-VOICE_RESULT_MAX_POLLS = int(os.getenv("VOICE_RESULT_MAX_POLLS", "8"))
+# Outer deadline for the whole background turn. Must stay above agent.py's
+# VOICE_API_TIMEOUT_SECS (20s) or it kills the API call before it can answer,
+# and below the ~24s the /voice/result poll loop can keep the caller held.
+VOICE_AGENT_TIMEOUT_SECS = float(os.getenv("VOICE_AGENT_TIMEOUT_SECS", "22.0"))
+# Must cover VOICE_AGENT_TIMEOUT_SECS even if each poll is only ~2s of audio,
+# otherwise the caller hears "taking longer" while the answer is still coming.
+# Extra polls cost nothing: the loop exits as soon as the result lands.
+VOICE_RESULT_MAX_POLLS = int(os.getenv("VOICE_RESULT_MAX_POLLS", "12"))
 SILENCE_REPROMPT = "I didn't catch that. Say the item again, or say cancel."
 VOICE_AGENT_TIMEOUT_MESSAGE = (
     "Swiggy is taking a bit longer. I'm still here. "

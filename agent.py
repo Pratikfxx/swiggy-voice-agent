@@ -44,11 +44,15 @@ client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 AGENT_MODEL = os.getenv("AGENT_MODEL", "claude-sonnet-5")
 VOICE_MODEL = os.getenv("VOICE_MODEL", "claude-haiku-4-5")
 # Sonnet 5 runs adaptive thinking ON when the param is omitted — that burns
-# thinking tokens on every turn. Grocery ordering doesn't need it, so we disable
-# thinking on the chat surface to keep token consumption down. Override to
-# "adaptive" if you want reasoning back (higher cost).
+# tokens and, on voice, latency: a measured "get milk" turn took 18.7s with
+# thinking vs 6.3s without. Grocery ordering needs neither. Override to
+# "adaptive" if you want reasoning back (slower, pricier).
 CHAT_THINKING = os.getenv("CHAT_THINKING", "disabled")
-VOICE_API_TIMEOUT_SECS = float(os.getenv("VOICE_API_TIMEOUT_SECS", "7.0"))
+VOICE_THINKING = os.getenv("VOICE_THINKING", "disabled")
+# This timeout covers the WHOLE agent loop, not one model turn: Swiggy runs as a
+# server-side MCP connector, so every search/lookup round trip happens inside a
+# single create() call. A measured live turn is ~6s, so keep real headroom here.
+VOICE_API_TIMEOUT_SECS = float(os.getenv("VOICE_API_TIMEOUT_SECS", "20.0"))
 CHAT_API_TIMEOUT_SECS = float(os.getenv("CHAT_API_TIMEOUT_SECS", "30.0"))
 CHAT_MAX_TOKENS = int(os.getenv("CHAT_MAX_TOKENS", "1024"))
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
@@ -558,17 +562,31 @@ def _model_for(surface):
     return VOICE_MODEL if surface == "voice" else AGENT_MODEL
 
 
-def _chat_thinking_kwargs(surface: str) -> dict:
-    """Request extras controlling thinking on the chat surface.
+# Models that think unless told not to. Only these need the disable switch —
+# Haiku and the Opus family already skip thinking when the param is omitted, and
+# sending an unsupported param to them would fail the request outright.
+_THINKS_BY_DEFAULT = ("claude-sonnet-5",)
+# Thinking is always on for the Fable family and any override is rejected (400).
+_THINKING_ALWAYS_ON = ("claude-fable", "claude-mythos")
 
-    Sonnet 5 runs adaptive thinking when the param is omitted, so we pass it
-    explicitly to keep token spend predictable. Voice (Haiku) takes no thinking
-    param. CHAT_THINKING="disabled" (default) turns it off; "adaptive" turns it
-    back on.
+
+def _thinking_kwargs(surface: str) -> dict:
+    """Request extras controlling thinking, per surface.
+
+    Disabled by default on both surfaces: it cuts token spend on chat and is
+    worth ~12s per turn on voice. Only sent to models that would otherwise
+    think, so pointing a surface at Haiku stays a no-op.
     """
-    if surface == "voice" or CHAT_THINKING not in ("disabled", "adaptive"):
+    model = _model_for(surface)
+    if model.startswith(_THINKING_ALWAYS_ON):
         return {}
-    return {"thinking": {"type": CHAT_THINKING}}
+
+    want = VOICE_THINKING if surface == "voice" else CHAT_THINKING
+    if want == "adaptive":
+        return {"thinking": {"type": "adaptive"}}
+    if want == "disabled" and model.startswith(_THINKS_BY_DEFAULT):
+        return {"thinking": {"type": "disabled"}}
+    return {}
 
 
 def _max_tokens_for(surface):
@@ -693,7 +711,7 @@ def _run_agent_demo(
 ) -> tuple[str, list[dict]]:
     system_prompt = VOICE_SYSTEM_PROMPT if surface == "voice" else CHAT_SYSTEM_PROMPT
     messages = conversation_history + [{"role": "user", "content": user_message}]
-    thinking_kwargs = _chat_thinking_kwargs(surface)
+    thinking_kwargs = _thinking_kwargs(surface)
 
     for _ in range(8):
         response = client.messages.create(
@@ -786,7 +804,7 @@ def _run_agent_live(
             for name in active
         ]
         tools.extend(LIVE_LOCAL_TOOLS)
-        thinking_kwargs = _chat_thinking_kwargs(surface)
+        thinking_kwargs = _thinking_kwargs(surface)
 
         response = None
         for _ in range(8):

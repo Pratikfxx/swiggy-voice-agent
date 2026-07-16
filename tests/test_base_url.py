@@ -108,5 +108,25 @@ class TtsCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second, "https://new.trycloudflare.com/audio/deadbeef")
 
 
+class VoiceTimeoutLayeringTests(unittest.TestCase):
+    """The deadlines must nest, or a turn dies before it can answer.
+
+    agent API timeout < background-job deadline < what the poll loop can hold.
+    """
+
+    def test_background_deadline_exceeds_agent_api_timeout(self):
+        vh = _fresh_voice_handler()
+        import agent
+
+        self.assertGreater(vh.VOICE_AGENT_TIMEOUT_SECS, agent.VOICE_API_TIMEOUT_SECS)
+
+    def test_poll_loop_can_hold_caller_longer_than_background_deadline(self):
+        vh = _fresh_voice_handler()
+        # Each poll speaks a short line then pauses 1s before redirecting back.
+        seconds_per_poll = 2.0
+        max_hold = vh.VOICE_RESULT_MAX_POLLS * seconds_per_poll
+        self.assertGreater(max_hold, vh.VOICE_AGENT_TIMEOUT_SECS)
+
+
 if __name__ == "__main__":
     unittest.main()
