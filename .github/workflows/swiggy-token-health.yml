@@ -1,5 +1,10 @@
 name: Swiggy Token Health
 
+# The im token lives ~5 days and Swiggy issues no refresh token, so the only
+# fix is a manual re-login. This check exists to warn BEFORE the bot dies.
+# Set the repo variable SWIGGY_HEALTH_URL to the deployment's /health URL
+# (Settings -> Secrets and variables -> Actions -> Variables).
+
 on:
   schedule:
     - cron: "17 */6 * * *"
@@ -9,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  SWIGGY_HEALTH_URL: https://pure-adventure-production-3bb1.up.railway.app/health
+  SWIGGY_HEALTH_URL: ${{ vars.SWIGGY_HEALTH_URL }}
   SWIGGY_TOKEN_WARN_HOURS: "24"
 
 jobs:
@@ -22,6 +27,10 @@ jobs:
           python-version: "3.12"
       - name: Check Swiggy token expiry
         run: |
+          if [ -z "$SWIGGY_HEALTH_URL" ]; then
+            echo "::error::Repo variable SWIGGY_HEALTH_URL is not set — point it at your deployment's /health URL"
+            exit 1
+          fi
           python scripts/check_swiggy_token_health.py \
             --url "$SWIGGY_HEALTH_URL" \
             --warn-hours "$SWIGGY_TOKEN_WARN_HOURS"

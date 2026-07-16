@@ -459,6 +459,30 @@ async def make_twiml_response(
     return str(vr)
 
 
+GREETING = "Hi, this is Swiggy Instamart. What groceries or essentials should I get for you?"
+
+
+async def prewarm_tts() -> None:
+    """Render the canned lines once at startup.
+
+    First caller otherwise pays ElevenLabs latency on the greeting; the rest
+    are the reprompt/timeout lines every call can hit. No-op without a key,
+    and failures just mean the per-call fallback path runs as before.
+    """
+    if not ELEVENLABS_API_KEY:
+        return
+    for line in (
+        GREETING,
+        "I'm here. What Instamart items should I get for you?",
+        SILENCE_REPROMPT,
+        VOICE_AGENT_TIMEOUT_MESSAGE,
+    ):
+        try:
+            await generate_tts_audio(clean_for_voice(line))
+        except Exception:
+            voice_logger.warning("TTS pre-warm failed for %r", line[:40], exc_info=True)
+
+
 def is_farewell(text: str) -> bool:
     """Detect if user wants to end the call."""
     return bool(_FAREWELL_RE.search(text or ""))
@@ -500,10 +524,8 @@ async def voice_answer(request: Request):
     form = await request.form()
     call_sid = form.get("CallSid", "unknown")
 
-    greeting = "Hi, this is Swiggy Instamart. What groceries or essentials should I get for you?"
-
     twiml = await make_twiml_response(
-        greeting, session_id=call_sid, base_url=resolve_base_url(request)
+        GREETING, session_id=call_sid, base_url=resolve_base_url(request)
     )
     return Response(content=twiml, media_type="application/xml")
 

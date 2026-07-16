@@ -12,6 +12,7 @@ Setup:
 import asyncio
 import logging
 import os
+import time
 import base64
 import httpx
 from fastapi import APIRouter, Request, Form
@@ -35,6 +36,31 @@ wa_logger = logging.getLogger("uvicorn.error")
 
 # Keep strong refs to in-flight background tasks so they aren't GC'd mid-run
 _background_tasks: set[asyncio.Task] = set()
+
+# Twilio redelivers a webhook when it doesn't get a timely 2xx (network blip,
+# restart mid-request). A redelivered "yes" would re-run the agent and can
+# double-place an order, so drop any MessageSid we've already accepted.
+_seen_message_sids: dict[str, float] = {}
+_SEEN_SID_TTL_SECS = 600.0
+_SEEN_SID_MAX = 1000
+
+
+def _is_duplicate_delivery(message_sid: str) -> bool:
+    if not message_sid:
+        return False
+
+    now = time.monotonic()
+    if len(_seen_message_sids) > _SEEN_SID_MAX:
+        cutoff = now - _SEEN_SID_TTL_SECS
+        for sid, ts in list(_seen_message_sids.items()):
+            if ts < cutoff:
+                _seen_message_sids.pop(sid, None)
+
+    seen_at = _seen_message_sids.get(message_sid)
+    if seen_at is not None and (now - seen_at) < _SEEN_SID_TTL_SECS:
+        return True
+    _seen_message_sids[message_sid] = now
+    return False
 
 
 async def transcribe_voice_note(media_url: str, media_content_type: str) -> str:
@@ -248,6 +274,10 @@ async def whatsapp_webhook(request: Request):
     num_media = int(form.get("NumMedia", 0))
     media_url = form.get("MediaUrl0", "")
     media_content_type = form.get("MediaContentType0", "")
+
+    if _is_duplicate_delivery(form.get("MessageSid", "")):
+        wa_logger.info("WA duplicate delivery dropped sid=%s from=%s", form.get("MessageSid"), from_number)
+        return Response(status_code=200)
 
     task = asyncio.create_task(
         _handle_incoming(from_number, body, num_media, media_url, media_content_type)

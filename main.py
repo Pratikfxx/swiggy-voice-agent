@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 import swiggy_auth
 import swiggy_address
 from swiggy_scope import ACTIVE_TOKEN_KEYS
-from voice_handler import router as voice_router
+from voice_handler import router as voice_router, prewarm_tts
 from whatsapp_handler import router as whatsapp_router
 
 load_dotenv()
@@ -42,6 +42,10 @@ async def _warm():
         await swiggy_address.refresh_default_address()
     except Exception:
         logging.exception("startup address warm failed")
+    try:
+        await prewarm_tts()
+    except Exception:
+        logging.exception("startup TTS pre-warm failed")
 
 
 @app.get("/health")
