@@ -19,7 +19,7 @@ import hashlib
 import json
 import asyncio
 import httpx
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from typing import Optional
 from fastapi import APIRouter, Request, Form
 from fastapi.responses import Response
@@ -127,14 +127,75 @@ VOICE_AGENT_TIMEOUT_MESSAGE = (
 )
 
 
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", ""}
+
+
 def get_base_url() -> str:
     """Return BASE_URL env var — set by Railway in prod, or by start.sh locally."""
     # NOTE: Do NOT call load_dotenv(override=True) here — that would let a local
     # .env file override Railway's env vars, breaking voice callbacks in production.
     return os.getenv("BASE_URL", "http://localhost:8000")
 
-# TTS cache — avoid re-generating same phrases
-_tts_cache: dict[str, str] = {}
+
+def _is_publicly_reachable(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        return (urlparse(url).hostname or "") not in _LOCAL_HOSTS
+    except ValueError:
+        return False
+
+
+def _base_url_from_request(request: Request) -> str:
+    """Rebuild our public origin from the request Twilio actually reached us on.
+
+    Tunnels (ngrok/cloudflared) rotate their hostname on every restart and
+    Railway injects its own, so a stale or unset BASE_URL points Twilio at
+    localhost and the call dies with "an application error occurred". The
+    forwarded headers describe the host Twilio really used, so trust those.
+    """
+    # Never raise: this runs inside the Twilio webhook, and an exception here is
+    # itself an "application error" on the call.
+    try:
+        headers = getattr(request, "headers", None) or {}
+        host = (headers.get("x-forwarded-host") or headers.get("host") or "").split(",")[0].strip()
+        if not host or host.split(":")[0] in _LOCAL_HOSTS:
+            return ""
+
+        scheme = (
+            headers.get("x-forwarded-proto")
+            or getattr(getattr(request, "url", None), "scheme", "")
+            or "https"
+        ).split(",")[0].strip()
+        return f"{scheme}://{host}"
+    except Exception:
+        voice_logger.warning("could not derive base URL from request", exc_info=True)
+        return ""
+
+
+def resolve_base_url(request: Optional[Request] = None) -> str:
+    """Public origin for callback URLs.
+
+    An explicitly configured public BASE_URL always wins — it is the operator's
+    stated intent and is not attacker-controllable. Only when it is unset or
+    still pointing at localhost do we fall back to the request's own host.
+    """
+    configured = get_base_url().strip().rstrip("/")
+    if _is_publicly_reachable(configured):
+        return configured
+
+    if request is not None:
+        derived = _base_url_from_request(request)
+        if derived:
+            return derived
+
+    return configured or "http://localhost:8000"
+
+
+# TTS cache — remembers which phrases we already rendered to /tmp. Stores the
+# cache key, not a full URL: the base URL can change between calls (tunnel
+# restart), which would make a cached absolute URL point at a dead host.
+_tts_cache: set[str] = set()
 _voice_fast_pending: dict[str, str] = {}
 _voice_agent_tasks: dict[str, asyncio.Task] = {}
 _voice_agent_results: dict[str, dict] = {}
@@ -243,12 +304,15 @@ def start_voice_agent_job(call_sid: str, speech_result: str) -> None:
     )
 
 
-def make_voice_waiting_twiml(call_sid: str, message: str, poll: int = 1) -> str:
+def make_voice_waiting_twiml(
+    call_sid: str, message: str, poll: int = 1, base_url: Optional[str] = None
+) -> str:
     vr = VoiceResponse()
     vr.say(message, voice="Polly.Aditi", language="en-IN")
     vr.pause(length=1)
+    base = (base_url or get_base_url()).rstrip("/")
     vr.redirect(
-        f"{get_base_url()}/voice/result?callSid={quote(call_sid)}&poll={poll}",
+        f"{base}/voice/result?callSid={quote(call_sid)}&poll={poll}",
         method="POST",
     )
     return str(vr)
@@ -263,7 +327,7 @@ def _elevenlabs_error_status(response_text: str) -> str:
     return detail.get("status", "") if isinstance(detail, dict) else ""
 
 
-async def generate_tts_audio(text: str) -> Optional[str]:
+async def generate_tts_audio(text: str, base_url: Optional[str] = None) -> Optional[str]:
     """
     Generate speech audio via ElevenLabs (async to avoid blocking event loop).
     Returns public URL to audio file, or None to fall back to Twilio <Say>.
@@ -279,9 +343,10 @@ async def generate_tts_audio(text: str) -> Optional[str]:
     if _el_failures >= _EL_MAX_FAILURES and time.time() < _el_disabled_until:
         return None
 
+    base = (base_url or get_base_url()).rstrip("/")
     cache_key = hashlib.md5(text.encode()).hexdigest()
     if cache_key in _tts_cache:
-        return _tts_cache[cache_key]
+        return f"{base}/audio/{cache_key}"
 
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
@@ -305,9 +370,8 @@ async def generate_tts_audio(text: str) -> Optional[str]:
             audio_path = f"/tmp/tts_{cache_key}.mp3"
             with open(audio_path, "wb") as f:
                 f.write(response.content)
-            url = f"{get_base_url()}/audio/{cache_key}"
-            _tts_cache[cache_key] = url
-            return url
+            _tts_cache.add(cache_key)
+            return f"{base}/audio/{cache_key}"
         else:
             status = _elevenlabs_error_status(response.text)
             if response.status_code == 401 and status == "detected_unusual_activity":
@@ -333,7 +397,8 @@ async def make_twiml_response(
     agent_text: str,
     session_id: str,
     is_final: bool = False,
-    gather_timeout: int = DEFAULT_GATHER_TIMEOUT
+    gather_timeout: int = DEFAULT_GATHER_TIMEOUT,
+    base_url: Optional[str] = None,
 ) -> str:
     """
     Build TwiML response that speaks agent_text then either:
@@ -346,8 +411,10 @@ async def make_twiml_response(
     # Clean text before any TTS — strip emojis and markdown
     spoken_text = clean_for_voice(agent_text)
 
+    base = (base_url or get_base_url()).rstrip("/")
+
     # Try ElevenLabs TTS first, fall back to Twilio <Say>
-    audio_url = await generate_tts_audio(spoken_text)
+    audio_url = await generate_tts_audio(spoken_text, base_url=base)
 
     if is_final:
         if audio_url:
@@ -356,7 +423,6 @@ async def make_twiml_response(
             vr.say(spoken_text, voice="Polly.Aditi", language="en-IN")
         vr.hangup()
     else:
-        base = get_base_url()
         gather = Gather(
             input="speech",
             action=f"{base}/voice/process",
@@ -430,7 +496,9 @@ async def voice_answer(request: Request):
 
     greeting = "Hi, this is Swiggy Instamart. What groceries or essentials should I get for you?"
 
-    twiml = await make_twiml_response(greeting, session_id=call_sid)
+    twiml = await make_twiml_response(
+        greeting, session_id=call_sid, base_url=resolve_base_url(request)
+    )
     return Response(content=twiml, media_type="application/xml")
 
 
@@ -458,11 +526,14 @@ async def voice_process(request: Request):
         clear_session(call_sid)
         return Response(content=str(vr), media_type="application/xml")
 
+    base_url = resolve_base_url(request)
+
     # Empty input
     if not speech_result.strip():
         twiml = await make_twiml_response(
             "I'm here. What Instamart items should I get for you?",
-            session_id=call_sid
+            session_id=call_sid,
+            base_url=base_url,
         )
         return Response(content=twiml, media_type="application/xml")
 
@@ -471,12 +542,15 @@ async def voice_process(request: Request):
         twiml = await make_twiml_response(
             fast_reply,
             session_id=call_sid,
-            gather_timeout=DEFAULT_GATHER_TIMEOUT
+            gather_timeout=DEFAULT_GATHER_TIMEOUT,
+            base_url=base_url,
         )
         return Response(content=twiml, media_type="application/xml")
 
     start_voice_agent_job(call_sid, speech_result)
-    twiml = make_voice_waiting_twiml(call_sid, "Checking Instamart now. One moment.")
+    twiml = make_voice_waiting_twiml(
+        call_sid, "Checking Instamart now. One moment.", base_url=base_url
+    )
     return Response(content=twiml, media_type="application/xml")
 
 
@@ -489,6 +563,8 @@ async def voice_result(request: Request):
         poll = int(request.query_params.get("poll", "1"))
     except ValueError:
         poll = 1
+
+    base_url = resolve_base_url(request)
 
     result = _voice_agent_results.pop(call_sid, None)
     if result:
@@ -505,6 +581,7 @@ async def voice_result(request: Request):
             session_id=call_sid,
             is_final=final,
             gather_timeout=DEFAULT_GATHER_TIMEOUT,
+            base_url=base_url,
         )
         return Response(content=twiml, media_type="application/xml")
 
@@ -513,6 +590,7 @@ async def voice_result(request: Request):
             call_sid,
             "Still checking Instamart.",
             poll=poll + 1,
+            base_url=base_url,
         )
         return Response(content=twiml, media_type="application/xml")
 
@@ -522,6 +600,7 @@ async def voice_result(request: Request):
         VOICE_AGENT_TIMEOUT_MESSAGE,
         session_id=call_sid,
         gather_timeout=DEFAULT_GATHER_TIMEOUT,
+        base_url=base_url,
     )
     return Response(content=twiml, media_type="application/xml")
 
