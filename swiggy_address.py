@@ -93,6 +93,25 @@ async def refresh_default_address() -> dict | None:
     return addr
 
 
+def get_default_blocking(timeout: float = 4.0) -> dict | None:
+    """Cached default address, fetching synchronously if the cache is cold.
+
+    Cold cache means the system prompt carries no address, and the model burns
+    a whole conversational turn asking which address to use — on voice that is
+    the first thing a caller hears after a deploy. A short blocking fetch is
+    cheaper than that turn. Runs in the agent's worker thread, so a fresh
+    event loop via asyncio.run is safe here.
+    """
+    addr = get_cached_default()
+    if addr:
+        return addr
+    try:
+        return asyncio.run(asyncio.wait_for(refresh_default_address(), timeout))
+    except Exception:
+        logging.exception("blocking address fetch failed")
+        return None
+
+
 def maybe_background_refresh() -> None:
     global _refreshing
     try:

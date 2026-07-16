@@ -38,7 +38,10 @@ from swiggy_tools import (
     book_dineout_table_mock,
 )
 
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+# max_retries=1 (default 2): when a model is overloaded, burning ~12s of SDK
+# retries inside the voice call budget starves the tier fallback below — one
+# quick retry, then we switch models instead.
+client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), max_retries=1)
 # Chat/WhatsApp brain: Claude Sonnet 5 — best value/quality for grocery ordering
 # with fridge reasoning and recipe carts. Voice stays on Haiku for the 7s deadline.
 AGENT_MODEL = os.getenv("AGENT_MODEL", "claude-sonnet-5")
@@ -55,6 +58,12 @@ VOICE_THINKING = os.getenv("VOICE_THINKING", "disabled")
 VOICE_API_TIMEOUT_SECS = float(os.getenv("VOICE_API_TIMEOUT_SECS", "20.0"))
 CHAT_API_TIMEOUT_SECS = float(os.getenv("CHAT_API_TIMEOUT_SECS", "30.0"))
 CHAT_MAX_TOKENS = int(os.getenv("CHAT_MAX_TOKENS", "1024"))
+# When the primary model is overloaded/rate-limited (429/5xx), retry the same
+# request once on the other tier instead of failing the conversation. Haiku 4.5
+# returned 529s for a stretch on 2026-07-16, which killed every voice call.
+# Empty string disables.
+VOICE_OVERLOAD_FALLBACK = os.getenv("VOICE_OVERLOAD_FALLBACK", "claude-sonnet-5")
+CHAT_OVERLOAD_FALLBACK = os.getenv("CHAT_OVERLOAD_FALLBACK", "claude-haiku-4-5")
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 DEFAULT_ADDRESS_ID = os.getenv("DEFAULT_ADDRESS_ID", "")
 DEFAULT_ADDRESS_LABEL = os.getenv("DEFAULT_ADDRESS_LABEL", "Home")
@@ -570,14 +579,14 @@ _THINKS_BY_DEFAULT = ("claude-sonnet-5",)
 _THINKING_ALWAYS_ON = ("claude-fable", "claude-mythos")
 
 
-def _thinking_kwargs(surface: str) -> dict:
-    """Request extras controlling thinking, per surface.
+def _thinking_for_model(model: str, surface: str) -> dict:
+    """Request extras controlling thinking for a specific model.
 
     Disabled by default on both surfaces: it cuts token spend on chat and is
     worth ~12s per turn on voice. Only sent to models that would otherwise
-    think, so pointing a surface at Haiku stays a no-op.
+    think, so pointing a surface at Haiku stays a no-op. Takes the model as an
+    argument because an overload fallback can swap tiers mid-request.
     """
-    model = _model_for(surface)
     if model.startswith(_THINKING_ALWAYS_ON):
         return {}
 
@@ -587,6 +596,43 @@ def _thinking_kwargs(surface: str) -> dict:
     if want == "disabled" and model.startswith(_THINKS_BY_DEFAULT):
         return {"thinking": {"type": "disabled"}}
     return {}
+
+
+def _thinking_kwargs(surface: str) -> dict:
+    return _thinking_for_model(_model_for(surface), surface)
+
+
+def _overload_fallback_for(surface: str) -> str:
+    return VOICE_OVERLOAD_FALLBACK if surface == "voice" else CHAT_OVERLOAD_FALLBACK
+
+
+def _is_capacity_error(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    return status == 429 or (isinstance(status, int) and status >= 500)
+
+
+def _create_message(surface: str, live: bool, **kwargs):
+    """Create a message on the surface's model, falling back on capacity errors.
+
+    When the primary tier is overloaded or rate-limited, the other tier is the
+    retry: same request, same thinking policy resolved for the new model.
+    """
+    def attempt(model: str):
+        endpoint = client.beta.messages if live else client.messages
+        return endpoint.create(model=model, **_thinking_for_model(model, surface), **kwargs)
+
+    primary = _model_for(surface)
+    try:
+        return attempt(primary)
+    except anthropic.APIStatusError as exc:
+        fallback = _overload_fallback_for(surface)
+        if not fallback or fallback == primary or not _is_capacity_error(exc):
+            raise
+        logging.warning(
+            "model %s capacity error (%s); retrying on %s",
+            primary, getattr(exc, "status_code", "?"), fallback,
+        )
+        return attempt(fallback)
 
 
 def _max_tokens_for(surface):
@@ -711,17 +757,16 @@ def _run_agent_demo(
 ) -> tuple[str, list[dict]]:
     system_prompt = VOICE_SYSTEM_PROMPT if surface == "voice" else CHAT_SYSTEM_PROMPT
     messages = conversation_history + [{"role": "user", "content": user_message}]
-    thinking_kwargs = _thinking_kwargs(surface)
 
     for _ in range(8):
-        response = client.messages.create(
-            model=_model_for(surface),
+        response = _create_message(
+            surface,
+            live=False,
             max_tokens=_max_tokens_for(surface),
             system=system_prompt,
             tools=TOOLS,
             messages=messages,
             timeout=_api_timeout_for(surface),
-            **thinking_kwargs,
         )
         if response.stop_reason == "refusal":
             messages.append({"role": "assistant", "content": REFUSAL_MESSAGE})
@@ -759,8 +804,14 @@ def _run_agent_live(
         system_prompt = (
             VOICE_SYSTEM_PROMPT if surface == "voice" else CHAT_SYSTEM_PROMPT
         ) + LIVE_SYSTEM_SUFFIX
-        swiggy_address.maybe_background_refresh()
         default_address = swiggy_address.get_cached_default()
+        if default_address:
+            # warm cache: refresh in the background if the TTL lapsed
+            swiggy_address.maybe_background_refresh()
+        else:
+            # cold cache (first call after deploy): fetch now, or the model
+            # burns the caller's first turn asking which address to use
+            default_address = swiggy_address.get_default_blocking()
         if default_address:
             addr_id = default_address["id"]
             addr_label = default_address["label"]
@@ -804,12 +855,12 @@ def _run_agent_live(
             for name in active
         ]
         tools.extend(LIVE_LOCAL_TOOLS)
-        thinking_kwargs = _thinking_kwargs(surface)
 
         response = None
         for _ in range(8):
-            response = client.beta.messages.create(
-                model=_model_for(surface),
+            response = _create_message(
+                surface,
+                live=True,
                 max_tokens=_max_tokens_for(surface),
                 system=system_prompt,
                 tools=tools,
@@ -817,7 +868,6 @@ def _run_agent_live(
                 betas=["mcp-client-2025-11-20"],
                 messages=messages,
                 timeout=_api_timeout_for(surface),
-                **thinking_kwargs,
             )
             messages.append({"role": "assistant", "content": response.content})
 

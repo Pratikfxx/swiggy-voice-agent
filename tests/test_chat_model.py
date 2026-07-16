@@ -142,6 +142,94 @@ class ChatModelConfigTests(unittest.TestCase):
         agent = _fresh_agent({"AGENT_MODEL": "claude-fable-5"})
         self.assertEqual(agent._thinking_kwargs("chat"), {})
 
+    def test_voice_falls_back_to_sonnet_when_haiku_overloaded(self):
+        agent = _fresh_agent({"DEMO_MODE": "false"})
+        import anthropic, httpx
+
+        attempts = []
+
+        def fake_create(**kwargs):
+            attempts.append(kwargs)
+            if kwargs["model"] == "claude-haiku-4-5":
+                raise anthropic.APIStatusError(
+                    "overloaded",
+                    response=httpx.Response(529, request=httpx.Request("POST", "http://t")),
+                    body={"error": {"type": "overloaded_error"}},
+                )
+            return FakeResponse()
+
+        with (
+            patch.object(agent.client.beta.messages, "create", side_effect=fake_create),
+            patch.object(agent.swiggy_address, "maybe_background_refresh"),
+            patch.object(agent.swiggy_address, "get_cached_default", return_value={"id": "a1", "label": "Home", "area": "X"}),
+        ):
+            response, _ = agent._run_agent_live("milk", [], "voice", "call-t", {"im": "t"})
+
+        self.assertEqual(response, "ok")
+        self.assertEqual([a["model"] for a in attempts], ["claude-haiku-4-5", "claude-sonnet-5"])
+        # thinking policy must be re-resolved for the fallback model
+        self.assertNotIn("thinking", attempts[0])
+        self.assertEqual(attempts[1]["thinking"], {"type": "disabled"})
+
+    def test_non_capacity_errors_do_not_fall_back(self):
+        agent = _fresh_agent({"DEMO_MODE": "false"})
+        import anthropic, httpx
+
+        def fake_create(**kwargs):
+            raise anthropic.APIStatusError(
+                "bad request",
+                response=httpx.Response(400, request=httpx.Request("POST", "http://t")),
+                body={},
+            )
+
+        with (
+            patch.object(agent.client.beta.messages, "create", side_effect=fake_create),
+            patch.object(agent.swiggy_address, "maybe_background_refresh"),
+            patch.object(agent.swiggy_address, "get_cached_default", return_value=None),
+            patch.object(agent.swiggy_address, "get_default_blocking", return_value=None),
+            patch.object(agent.logging, "exception"),
+        ):
+            response, _ = agent._run_agent_live("milk", [], "voice", "call-t", {"im": "t"})
+
+        # surfaces as the generic failure message, not a silent cross-tier retry
+        self.assertIn("problem reaching Swiggy", response)
+
+    def test_cold_address_cache_fetches_blocking_before_prompting(self):
+        agent = _fresh_agent({"DEMO_MODE": "false"})
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return FakeResponse()
+
+        with (
+            patch.object(agent.client.beta.messages, "create", side_effect=fake_create),
+            patch.object(agent.swiggy_address, "get_cached_default", return_value=None),
+            patch.object(
+                agent.swiggy_address,
+                "get_default_blocking",
+                return_value={"id": "addr9", "label": "Ghar", "area": "Nagpur"},
+            ) as blocking,
+        ):
+            response, _ = agent._run_agent_live("milk", [], "voice", "call-t", {"im": "t"})
+
+        blocking.assert_called_once()
+        self.assertIn("DEFAULT DELIVERY ADDRESS: Ghar (Nagpur), addressId addr9", captured["system"])
+
+    def test_warm_address_cache_skips_blocking_fetch(self):
+        agent = _fresh_agent({"DEMO_MODE": "false"})
+
+        with (
+            patch.object(agent.client.beta.messages, "create", return_value=FakeResponse()),
+            patch.object(agent.swiggy_address, "maybe_background_refresh") as bg,
+            patch.object(agent.swiggy_address, "get_cached_default", return_value={"id": "a1", "label": "Home", "area": "X"}),
+            patch.object(agent.swiggy_address, "get_default_blocking") as blocking,
+        ):
+            agent._run_agent_live("milk", [], "voice", "call-t", {"im": "t"})
+
+        blocking.assert_not_called()
+        bg.assert_called_once()
+
     def test_demo_refusal_returns_safe_message(self):
         agent = _fresh_agent()
 
