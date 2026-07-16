@@ -27,6 +27,7 @@ from twilio.twiml.voice_response import VoiceResponse, Gather, Say, Play, Hangup
 from dotenv import load_dotenv
 
 from agent import process_message, clear_session
+from twilio_security import verify_twilio_request
 
 
 _FAREWELL_RE = re.compile(r"\b(bye|goodbye|good bye|cancel|hang up|end call|band karo|band kar do|stop)\b", re.I)
@@ -522,6 +523,8 @@ async def voice_answer(request: Request):
     Greet and start gathering input.
     """
     form = await request.form()
+    if not verify_twilio_request(request, form):
+        return Response(status_code=403)
     call_sid = form.get("CallSid", "unknown")
 
     twiml = await make_twiml_response(
@@ -537,6 +540,8 @@ async def voice_process(request: Request):
     Runs agent, returns spoken TwiML response.
     """
     form = await request.form()
+    if not verify_twilio_request(request, form):
+        return Response(status_code=403)
     call_sid = form.get("CallSid", "unknown")
     speech_result = form.get("SpeechResult", "")
     confidence = float(form.get("Confidence", 0))
@@ -586,6 +591,8 @@ async def voice_process(request: Request):
 async def voice_result(request: Request):
     """Poll for a background voice agent result while keeping the call audible."""
     form = await request.form()
+    if not verify_twilio_request(request, form):
+        return Response(status_code=403)
     call_sid = request.query_params.get("callSid") or form.get("CallSid", "")
     try:
         poll = int(request.query_params.get("poll", "1"))
@@ -637,6 +644,8 @@ async def voice_result(request: Request):
 async def voice_status(request: Request):
     """Twilio call status webhook — cleanup on call end."""
     form = await request.form()
+    if not verify_twilio_request(request, form):
+        return Response(status_code=403)
     call_sid = form.get("CallSid", "")
     call_status = form.get("CallStatus", "")
     if call_status in ("completed", "failed", "busy", "no-answer"):

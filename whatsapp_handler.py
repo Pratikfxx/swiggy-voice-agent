@@ -21,6 +21,7 @@ from twilio.rest import Client as TwilioClient
 from dotenv import load_dotenv
 
 from agent import process_message, get_session, update_session
+from twilio_security import verify_twilio_request
 
 load_dotenv()
 
@@ -268,6 +269,8 @@ async def whatsapp_webhook(request: Request):
     timeout, and a timed-out webhook gets retried (double processing).
     """
     form = await request.form()
+    if not verify_twilio_request(request, form):
+        return Response(status_code=403)
 
     from_number = form.get("From", "")       # e.g. "whatsapp:+919876543210"
     body = form.get("Body", "").strip()
