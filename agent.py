@@ -1010,10 +1010,42 @@ def get_session(session_id: str) -> list[dict]:
     return _sessions.get(session_id, [])
 
 
+def _sanitize_history(history: list[dict]) -> list[dict]:
+    """Collapse each turn to plain text before persisting.
+
+    Server-side MCP turns embed `mcp_tool_use`/`mcp_tool_result` blocks (and
+    local `tool_use`/`tool_result` pairs) that span several assistant messages
+    across `pause_turn` iterations. Storing those raw and later slicing with
+    history[-20:] can drop a result while keeping its use, which makes the next
+    request 400 with "mcp_tool_use ... without a corresponding mcp_tool_result".
+    Cross-turn context only needs the spoken text, so store text-only and let
+    each new turn rebuild its own tool plumbing (also keeps replay cheap).
+    """
+    clean: list[dict] = []
+    for message in history:
+        role = message.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = _content_text(message.get("content"))
+        if not text:
+            continue
+        if clean and clean[-1]["role"] == role:
+            clean[-1]["content"] = f"{clean[-1]['content']} {text}".strip()
+        else:
+            clean.append({"role": role, "content": text})
+    # The API requires the first message to be from the user.
+    while clean and clean[0]["role"] != "user":
+        clean.pop(0)
+    return clean
+
+
 def update_session(session_id: str, history: list[dict]) -> None:
-    """Update conversation history. Keep last 20 turns to avoid token overflow."""
-    # Keep only last 20 messages (10 turns)
-    _sessions[session_id] = history[-20:]
+    """Persist conversation history as plain text, last 20 messages.
+
+    Text-only storage avoids dangling MCP tool blocks after truncation and
+    keeps replayed history cheap; each turn rebuilds its own tool calls.
+    """
+    _sessions[session_id] = _sanitize_history(history)[-20:]
 
 
 def clear_session(session_id: str) -> None:
