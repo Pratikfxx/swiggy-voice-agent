@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: swiggy-voice-agent
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: BASE_URL
+        value: https://swiggy-voice-agent.onrender.com
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
+      - key: DEFAULT_ADDRESS_AREA
+        sync: false
+      - key: DEFAULT_ADDRESS_ID
+        sync: false
+      - key: DEFAULT_ADDRESS_LABEL
+        sync: false
+      - key: DEMO_MODE
+        sync: false
+      - key: SWIGGY_DINEOUT_TOKEN
+        sync: false
+      - key: SWIGGY_FOOD_TOKEN
+        sync: false
+      - key: SWIGGY_IM_TOKEN
+        sync: false
+      - key: SWIGGY_MCP_BASE_URL
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false
+      - key: TWILIO_WHATSAPP_NUMBER
+        sync: false
+      - key: VOICE_MODEL
+        sync: false
