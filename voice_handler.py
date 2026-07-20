@@ -37,6 +37,16 @@ _VOICE_ITEM_COMMAND_RE = re.compile(
     re.I,
 )
 _VOICE_ITEM_SPLIT_RE = re.compile(r"\s*(?:,|&|\+|\band\b|\baur\b)\s*", re.I)
+# A split fragment carrying any of these is a question/command about the order
+# ("which address", "what is the total", "use my office"), not a grocery item.
+# Guards the multi-item fast path from mis-splitting natural sentences on "and".
+_VOICE_NON_ITEM_RE = re.compile(
+    r"\b(which|what|where|when|why|how|who|address|addresses|total|price|cost|"
+    r"deliver|delivery|use|using|change|switch|office|home|work|is|are|was|will|"
+    r"would|can|could|should|do|does|my|your|this|that|confirm|cancel|checkout|"
+    r"place|cart|pay|payment|for)\b",
+    re.I,
+)
 
 
 def clean_for_voice(text: str) -> str:
@@ -127,6 +137,10 @@ VOICE_AGENT_TIMEOUT_SECS = float(os.getenv("VOICE_AGENT_TIMEOUT_SECS", "22.0"))
 # otherwise the caller hears "taking longer" while the answer is still coming.
 # Extra polls cost nothing: the loop exits as soon as the result lands.
 VOICE_RESULT_MAX_POLLS = int(os.getenv("VOICE_RESULT_MAX_POLLS", "12"))
+# The agent now batch-searches multiple items in parallel (~one search's time),
+# so a normal grocery list no longer risks the voice deadline. Only trip the
+# one-at-a-time guard for long lists; smaller ones go straight to the agent.
+_VOICE_MULTI_ITEM_GUARD = int(os.getenv("VOICE_MULTI_ITEM_GUARD", "6"))
 SILENCE_REPROMPT = "I didn't catch that. Say the item again, or say cancel."
 VOICE_AGENT_TIMEOUT_MESSAGE = (
     "Swiggy is taking a bit longer. I'm still here. "
@@ -222,10 +236,17 @@ def _extract_fast_instamart_items(text: str) -> list[str]:
     parts = _VOICE_ITEM_SPLIT_RE.split(text or "")
     items = []
     for part in parts:
+        # Skip fragments that are questions/commands, not grocery items.
+        if _VOICE_NON_ITEM_RE.search(part):
+            continue
         item = _VOICE_ITEM_COMMAND_RE.sub(" ", part)
         item = re.sub(r"\s{2,}", " ", item).strip(" .,!?:;")
-        if item:
-            items.append(item)
+        if not item:
+            continue
+        # Grocery items are short noun phrases; anything longer is a sentence.
+        if len(item.split()) > 4:
+            continue
+        items.append(item)
     return items
 
 
@@ -238,7 +259,7 @@ def _fast_voice_reply_or_message(call_sid: str, speech_result: str) -> tuple[str
             return "", f"get {pending_item}"
 
     items = _extract_fast_instamart_items(speech_result)
-    if len(items) < 2:
+    if len(items) <= _VOICE_MULTI_ITEM_GUARD:
         return "", speech_result
 
     first, second = items[0], items[1]

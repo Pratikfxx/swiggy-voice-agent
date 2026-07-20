@@ -19,6 +19,7 @@ import anthropic
 from recipe_engine import get_recipe_ingredients as _get_recipe_ingredients
 from order_history import save_order, get_recent_orders
 import swiggy_address
+from swiggy_search import search_and_add_to_cart
 from swiggy_auth import get_access_tokens
 from swiggy_scope import (
     ACTIVE_SWIGGY_SERVERS,
@@ -316,12 +317,45 @@ TOOLS = [
             },
             "required": []
         }
+    },
+    {
+        "name": "search_and_add_to_cart",
+        "description": (
+            "Search MANY Instamart items in parallel AND add the best in-stock "
+            "match of each to the cart, in ONE call. ALWAYS use this for two or "
+            "more items — a grocery list, or all ingredients from "
+            "get_recipe_ingredients — instead of searching one at a time. Pass "
+            "the delivery addressId for this order. It returns what was added "
+            "(names, prices, subtotal) and anything not found. After it returns, "
+            "just read the summary and ask the user to confirm; the cart is "
+            "already built, so do NOT call search_products or update_cart again."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Item names, e.g. ['paneer', 'basmati rice', 'yogurt']",
+                },
+                "address_id": {
+                    "type": "string",
+                    "description": "The delivery addressId (default, or the user's chosen saved address).",
+                },
+                "quantity": {
+                    "type": "integer",
+                    "description": "Quantity per item (default 1).",
+                    "default": 1,
+                },
+            },
+            "required": ["queries", "address_id"],
+        },
     }
 ]
 
 LIVE_LOCAL_TOOLS = [
     tool for tool in TOOLS
-    if tool["name"] in {"get_recipe_ingredients", "get_order_history"}
+    if tool["name"] in {"get_recipe_ingredients", "get_order_history", "search_and_add_to_cart"}
 ]
 LOCAL_NAMES = {tool["name"] for tool in LIVE_LOCAL_TOOLS}
 
@@ -347,6 +381,13 @@ def execute_tool(tool_name: str, tool_input: dict, session_id: str = "") -> str:
 
         elif tool_name == "get_recipe_ingredients":
             result = _get_recipe_ingredients(tool_input["dish_name"])
+
+        elif tool_name == "search_and_add_to_cart":
+            result = search_and_add_to_cart(
+                tool_input["queries"],
+                tool_input["address_id"],
+                tool_input.get("quantity", 1),
+            )
 
         elif tool_name == "search_grocery_product":
             result = search_instamart_products(
@@ -471,6 +512,14 @@ ORDER FLOW:
 3. On yes → checkout → say done in one sentence → hang up.
 - Always use saved address. Never ask for it.
 - Only place after: yes, haan, okay, confirm, theek hai.
+- MULTIPLE items or a recipe: call search_and_add_to_cart ONCE with EVERY item
+  (and the addressId). It searches AND fills the cart in one step — never search
+  items one at a time, and do NOT call update_cart yourself afterward.
+- After search_and_add_to_cart returns, speak ONE line: the main items, the
+  subtotal, mention anything not_found, and ask "Confirm?". Do not narrate "let
+  me add these" — the cart is already built when the tool returns.
+- RECIPE (e.g. "ingredients for paneer biryani"): get_recipe_ingredients, then
+  pass that whole ingredient list to search_and_add_to_cart in ONE call.
 
 CONFIRMATION:
 - Grocery: "[Main items], [total] rupees, [ETA] on Instamart. Confirm?"
@@ -868,9 +917,17 @@ def _run_agent_live(
         if addr_id:
             system_prompt += (
                 f"\n\nDEFAULT DELIVERY ADDRESS: {addr_label} ({addr_area}), "
-                f"addressId {addr_id}. Use this addressId directly for all orders. "
-                "Do NOT call get_addresses at all unless the user explicitly asks to change, "
-                "list, or pick a different address."
+                f"addressId {addr_id}. By default use this addressId for "
+                "search_products, update_cart (as selectedAddressId), and checkout, "
+                "and do NOT call get_addresses.\n"
+                "IF the user asks to deliver to a DIFFERENT saved address (an office, "
+                "another label, a different city): call get_addresses, find the entry "
+                "whose addressTag/addressLine matches what they said, take its `id`, and "
+                "use THAT id as the addressId for EVERY subsequent search_products, "
+                "update_cart, and checkout call — all cart and order tools in one order "
+                "must use the same chosen addressId, never a mix. If no saved address "
+                "matches, say so and stop; never place an order to the default address "
+                "when the user asked for a different one."
             )
         confirmed = _is_confirmation(user_message)
         active = _route_servers(user_message, surface)
