@@ -520,6 +520,9 @@ ORDER FLOW:
   me add these" — the cart is already built when the tool returns.
 - RECIPE (e.g. "ingredients for paneer biryani"): get_recipe_ingredients, then
   pass that whole ingredient list to search_and_add_to_cart in ONE call.
+- NEVER offer to make an ingredient from scratch. Paneer, ghee, curd, pastes and
+  masalas are all sold ready on Instamart — always buy the ready product. Do not
+  ask "should I get paneer or the milk to make it" or similar; just buy it.
 
 CONFIRMATION:
 - Grocery: "[Main items], [total] rupees, [ETA] on Instamart. Confirm?"
