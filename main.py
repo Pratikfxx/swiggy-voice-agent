@@ -22,6 +22,7 @@ import swiggy_auth
 import swiggy_address
 from swiggy_scope import ACTIVE_TOKEN_KEYS
 from voice_handler import router as voice_router, prewarm_tts
+from voice_stream import router as voice_stream_router
 from whatsapp_handler import router as whatsapp_router
 
 load_dotenv()
@@ -33,6 +34,7 @@ app = FastAPI(
 )
 
 app.include_router(voice_router)
+app.include_router(voice_stream_router)
 app.include_router(whatsapp_router)
 
 
