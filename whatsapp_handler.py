@@ -21,7 +21,9 @@ from twilio.rest import Client as TwilioClient
 from dotenv import load_dotenv
 
 from agent import normalize_user_id, process_message, get_session, update_session
+import swiggy_link
 from twilio_security import verify_twilio_request
+from voice_handler import resolve_base_url
 
 load_dotenv()
 
@@ -316,6 +318,18 @@ async def _handle_incoming_inner(
 ) -> None:
     session_id = from_number  # phone number as session key
     user_id = normalize_user_id(from_number)
+
+    if body.strip().lower() in {"link", "login", "link swiggy", "connect swiggy"}:
+        try:
+            server_key = swiggy_link.active_server_key()
+            link_url = swiggy_link.build_start_url(
+                user_id, server_key, resolve_base_url()
+            )
+            await _send(from_number, f"Open this link to connect your Swiggy account: {link_url}")
+        except Exception as exc:
+            wa_logger.warning("Swiggy link reply failed (%s)", exc.__class__.__name__)
+            await _send(from_number, "Swiggy account linking is temporarily unavailable. Please try again later.")
+        return
 
     # ── Handle fridge/pantry photo ───────────────────────────────────────────
     if num_media > 0 and "image" in media_content_type:
