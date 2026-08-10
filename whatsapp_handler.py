@@ -20,7 +20,7 @@ from fastapi.responses import Response
 from twilio.rest import Client as TwilioClient
 from dotenv import load_dotenv
 
-from agent import process_message, get_session, update_session
+from agent import normalize_user_id, process_message, get_session, update_session
 from twilio_security import verify_twilio_request
 
 load_dotenv()
@@ -315,6 +315,7 @@ async def _handle_incoming_inner(
     media_content_type: str,
 ) -> None:
     session_id = from_number  # phone number as session key
+    user_id = normalize_user_id(from_number)
 
     # ── Handle fridge/pantry photo ───────────────────────────────────────────
     if num_media > 0 and "image" in media_content_type:
@@ -406,6 +407,7 @@ async def _handle_incoming_inner(
         session_id=session_id,
         user_message=body,
         surface="chat",
+        user_id=user_id,
     )
 
     # Send response

@@ -110,6 +110,10 @@ def _route_servers(user_message: str, surface: str) -> list[str]:
 def _is_confirmation(text):
     return bool(CONFIRM_RE.search(text or ""))
 
+
+def normalize_user_id(identity: str) -> str:
+    return str(identity or "").removeprefix("whatsapp:")
+
 # ─────────────────────────────────────────────
 # Tool definitions — Claude sees these
 # ─────────────────────────────────────────────
@@ -367,8 +371,11 @@ LOCAL_NAMES = {tool["name"] for tool in LIVE_LOCAL_TOOLS}
 # Tool executor — maps tool names → functions
 # ─────────────────────────────────────────────
 
-def execute_tool(tool_name: str, tool_input: dict, session_id: str = "") -> str:
+def execute_tool(
+    tool_name: str, tool_input: dict, session_id: str = "", user_id: str = ""
+) -> str:
     """Execute a tool call and return JSON string result."""
+    user_id = user_id or session_id
     try:
         if tool_name == "get_user_address":
             result = get_saved_address()
@@ -404,14 +411,14 @@ def execute_tool(tool_name: str, tool_input: dict, session_id: str = "") -> str:
                 tool_input["items"]
             )
             # Auto-save to order history on success
-            if session_id and result.get("success"):
+            if user_id and result.get("success"):
                 items = tool_input.get("items", [])
                 summary = (
                     f"{', '.join(i.get('name','') for i in items[:3])}"
                     f" from {tool_input.get('restaurant_name', '')}"
                 )
                 save_order(
-                    session_id=session_id,
+                    session_id=user_id,
                     order_type="food",
                     summary=summary,
                     items=items,
@@ -422,14 +429,14 @@ def execute_tool(tool_name: str, tool_input: dict, session_id: str = "") -> str:
         elif tool_name == "place_grocery_order":
             result = place_instamart_order_mock(tool_input["items"])
             # Auto-save to order history on success
-            if session_id and result.get("success"):
+            if user_id and result.get("success"):
                 items = tool_input.get("items", [])
                 summary = (
                     f"Groceries: {', '.join(i.get('name','') for i in items[:4])}"
                     + (" & more" if len(items) > 4 else "")
                 )
                 save_order(
-                    session_id=session_id,
+                    session_id=user_id,
                     order_type="grocery",
                     summary=summary,
                     items=items,
@@ -458,9 +465,9 @@ def execute_tool(tool_name: str, tool_input: dict, session_id: str = "") -> str:
                 tool_input["guests"]
             )
             # Auto-save dineout booking on success
-            if session_id and result.get("success"):
+            if user_id and result.get("success"):
                 save_order(
-                    session_id=session_id,
+                    session_id=user_id,
                     order_type="dineout",
                     summary=(
                         f"Table for {tool_input.get('guests')} "
@@ -473,7 +480,7 @@ def execute_tool(tool_name: str, tool_input: dict, session_id: str = "") -> str:
 
         elif tool_name == "get_order_history":
             limit = min(int(tool_input.get("limit", 5)), 10)
-            orders = get_recent_orders(session_id, limit=limit) if session_id else []
+            orders = get_recent_orders(user_id, limit=limit) if user_id else []
             if not orders:
                 result = {"orders": [], "message": "No previous orders found for this user."}
             else:
@@ -808,7 +815,10 @@ def _live_order_summary(tool_name: str, tool_input: dict) -> tuple[str, str, lis
     return order_type, summary, items, restaurant_name, total_amount
 
 
-def _save_live_order_if_any(content_blocks: list, session_id: str) -> bool:
+def _save_live_order_if_any(
+    content_blocks: list, session_id: str, user_id: str = ""
+) -> bool:
+    user_id = user_id or session_id
     pending_spend_tools = {}
     last_pending_spend_tool = None
     for block in content_blocks:
@@ -832,9 +842,9 @@ def _save_live_order_if_any(content_blocks: list, session_id: str) -> bool:
                     _block_value(tool_use, "name", ""),
                     _block_value(tool_use, "input", {}),
                 )
-                if session_id:
+                if user_id:
                     save_order(
-                        session_id=session_id,
+                        session_id=user_id,
                         order_type=order_type,
                         summary=summary,
                         items=items,
@@ -857,6 +867,7 @@ def _run_agent_demo(
     surface: str = "voice",
     session_id: str = "",
     return_meta: bool = False,
+    user_id: str = "",
 ) -> tuple[str, list[dict]]:
     system_prompt = VOICE_SYSTEM_PROMPT if surface == "voice" else CHAT_SYSTEM_PROMPT
     messages = conversation_history + [{"role": "user", "content": user_message}]
@@ -885,7 +896,9 @@ def _run_agent_demo(
             {
                 "type": "tool_result",
                 "tool_use_id": tu.id,
-                "content": execute_tool(tu.name, tu.input, session_id=session_id),
+                "content": execute_tool(
+                    tu.name, tu.input, session_id=session_id, user_id=user_id
+                ),
             }
             for tu in tool_use_blocks
         ]
@@ -903,9 +916,11 @@ def _run_agent_live(
     session_id: str,
     tokens: dict[str, str],
     return_meta: bool = False,
+    user_id: str = "",
 ) -> tuple[str, list[dict]]:
     messages = conversation_history + [{"role": "user", "content": user_message}]
     order_placed = False
+    user_id = user_id or session_id
 
     try:
         system_prompt = (
@@ -1000,7 +1015,9 @@ def _run_agent_live(
                 {
                     "type": "tool_result",
                     "tool_use_id": b.id,
-                    "content": execute_tool(b.name, b.input, session_id=session_id),
+                    "content": execute_tool(
+                        b.name, b.input, session_id=session_id, user_id=user_id
+                    ),
                 }
                 for b in local_tool_uses
             ]
@@ -1014,7 +1031,7 @@ def _run_agent_live(
             if isinstance(content, str):
                 continue
             assistant_blocks.extend(content or [])
-        order_placed = _save_live_order_if_any(assistant_blocks, session_id)
+        order_placed = _save_live_order_if_any(assistant_blocks, session_id, user_id)
 
         # Whole-chain refusal (Fable declined and fallback declined too, or no
         # fallback configured) — content is empty or partial, don't read it.
@@ -1052,6 +1069,7 @@ def run_agent(
     surface: str = "voice",  # "voice" or "chat"
     session_id: str = "",
     return_meta: bool = False,
+    user_id: str = "",
 ) -> tuple[str, list[dict]]:
     """
     Run one turn of the agent.
@@ -1066,7 +1084,12 @@ def run_agent(
     """
     if DEMO_MODE:
         return _run_agent_demo(
-            user_message, conversation_history, surface, session_id, return_meta
+            user_message,
+            conversation_history,
+            surface,
+            session_id,
+            return_meta,
+            user_id=user_id,
         )
 
     try:
@@ -1080,7 +1103,13 @@ def run_agent(
         return _agent_result(LIVE_AUTH_NOT_READY_MESSAGE, messages, return_meta=return_meta)
 
     return _run_agent_live(
-        user_message, conversation_history, surface, session_id, tokens, return_meta
+        user_message,
+        conversation_history,
+        surface,
+        session_id,
+        tokens,
+        return_meta,
+        user_id=user_id,
     )
 
 
@@ -1169,18 +1198,21 @@ def process_message(
     surface: str = "voice",
     *,
     return_meta: bool = False,
+    user_id: str = "",
 ):
     """
     High-level entry point.
     Takes a session ID + user message, returns agent response string.
     """
     history = get_session(session_id)
+    user_id = user_id or session_id
     result = run_agent(
         user_message,
         history,
         surface,
         session_id=session_id,
         return_meta=return_meta,
+        user_id=user_id,
     )
     response_text, updated_history = result[:2]
     update_session(session_id, updated_history)

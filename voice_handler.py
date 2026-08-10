@@ -27,7 +27,8 @@ from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse, Gather, Say, Play, Hangup
 from dotenv import load_dotenv
 
-from agent import CONFIRM_RE, DEMO_MODE, process_message, clear_session
+from agent import CONFIRM_RE, DEMO_MODE, normalize_user_id, process_message, clear_session
+from order_history import get_recent_orders
 from twilio_security import verify_twilio_request
 
 
@@ -121,6 +122,7 @@ SPEECH_HINTS = ",".join(
         "toothpaste",
     ]
 )
+_STATIC_SPEECH_HINTS = SPEECH_HINTS.split(",")
 
 # Circuit breaker — skip ElevenLabs after repeated 4xx failures
 _el_failures = 0
@@ -231,10 +233,48 @@ except ValueError:
     TTS_CACHE_MAX = 200
 _tts_cache: OrderedDict[str, None] = OrderedDict()
 _voice_fast_pending: dict[str, str] = {}
+_voice_user_ids: OrderedDict[str, str] = OrderedDict()
+_VOICE_USER_CACHE_MAX = 1000
 _voice_agent_tasks: dict[str, asyncio.Task] = {}
 _voice_agent_results: dict[str, dict] = {}
 _voice_agent_job_ids: dict[str, int] = {}
 _voice_agent_next_job_id = 0
+
+
+def _remember_voice_user(call_sid: str, from_number: str) -> str:
+    user_id = normalize_user_id(from_number) if from_number else ""
+    if not user_id:
+        user_id = _voice_user_ids.get(call_sid, call_sid)
+    _voice_user_ids.pop(call_sid, None)
+    _voice_user_ids[call_sid] = user_id
+    while len(_voice_user_ids) > _VOICE_USER_CACHE_MAX:
+        _voice_user_ids.popitem(last=False)
+    return user_id
+
+
+def _forget_voice_user(call_sid: str) -> None:
+    _voice_user_ids.pop(call_sid, None)
+
+
+def _speech_hints(user_id: str) -> str:
+    hints = list(_STATIC_SPEECH_HINTS)
+    seen = {hint.casefold() for hint in hints}
+    try:
+        orders = get_recent_orders(user_id, limit=5) if user_id else []
+        for order in orders:
+            for item in order.get("items", []):
+                name = item.get("name", "") if isinstance(item, dict) else ""
+                name = str(name).strip()
+                if not name or name.casefold() in seen:
+                    continue
+                seen.add(name.casefold())
+                hints.append(name)
+                if len(hints) == 100:
+                    return ",".join(hints)
+    except Exception:
+        voice_logger.warning("voice speech hint history lookup failed", exc_info=True)
+        return SPEECH_HINTS
+    return ",".join(hints)
 
 
 def _remember_tts(cache_key: str) -> None:
@@ -298,9 +338,13 @@ def _fast_voice_reply_or_message(call_sid: str, speech_result: str) -> tuple[str
 
 
 async def run_voice_agent_with_deadline(
-    call_sid: str, speech_result: str, return_meta: bool = False
+    call_sid: str,
+    speech_result: str,
+    return_meta: bool = False,
+    user_id: str = "",
 ):
     start = time.monotonic()
+    user_id = user_id or _voice_user_ids.get(call_sid, call_sid)
     try:
         agent_result = await asyncio.wait_for(
             asyncio.to_thread(
@@ -309,6 +353,7 @@ async def run_voice_agent_with_deadline(
                 user_message=speech_result,
                 surface="voice",
                 return_meta=return_meta,
+                user_id=user_id,
             ),
             timeout=VOICE_AGENT_TIMEOUT_SECS,
         )
@@ -332,10 +377,12 @@ async def run_voice_agent_with_deadline(
     return agent_result, elapsed, False, {"order_placed": False}
 
 
-async def _run_voice_agent_background(call_sid: str, speech_result: str, job_id: int) -> None:
+async def _run_voice_agent_background(
+    call_sid: str, speech_result: str, job_id: int, user_id: str = ""
+) -> None:
     try:
         agent_response, elapsed, timed_out, meta = await run_voice_agent_with_deadline(
-            call_sid, speech_result, return_meta=True
+            call_sid, speech_result, return_meta=True, user_id=user_id
         )
         order_placed = bool(meta.get("order_placed", False))
         final = False if timed_out else order_placed or (DEMO_MODE and is_order_complete(agent_response))
@@ -357,14 +404,14 @@ async def _run_voice_agent_background(call_sid: str, speech_result: str, job_id:
         _voice_agent_tasks.pop(call_sid, None)
 
 
-def start_voice_agent_job(call_sid: str, speech_result: str) -> None:
+def start_voice_agent_job(call_sid: str, speech_result: str, user_id: str = "") -> None:
     global _voice_agent_next_job_id
     _voice_agent_next_job_id += 1
     job_id = _voice_agent_next_job_id
     _voice_agent_job_ids[call_sid] = job_id
     _voice_agent_results.pop(call_sid, None)
     _voice_agent_tasks[call_sid] = asyncio.create_task(
-        _run_voice_agent_background(call_sid, speech_result, job_id)
+        _run_voice_agent_background(call_sid, speech_result, job_id, user_id)
     )
 
 
@@ -465,6 +512,7 @@ async def make_twiml_response(
     is_final: bool = False,
     gather_timeout: int = DEFAULT_GATHER_TIMEOUT,
     base_url: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> str:
     """
     Build TwiML response that speaks agent_text then either:
@@ -478,6 +526,9 @@ async def make_twiml_response(
     spoken_text = clean_for_voice(agent_text)
 
     base = (base_url or get_base_url()).rstrip("/")
+    user_id = normalize_user_id(
+        user_id or _voice_user_ids.get(session_id, session_id)
+    )
 
     # Try ElevenLabs TTS first, fall back to Twilio <Say>
     audio_url = await generate_tts_audio(spoken_text, base_url=base)
@@ -489,6 +540,7 @@ async def make_twiml_response(
             vr.say(spoken_text, voice="Polly.Aditi", language="en-IN")
         vr.hangup()
     else:
+        speech_hints = _speech_hints(user_id)
         gather = Gather(
             input="speech",
             action=f"{base}/voice/process",
@@ -496,7 +548,7 @@ async def make_twiml_response(
             timeout=gather_timeout,
             speech_timeout="auto",
             language="en-IN",
-            hints=SPEECH_HINTS,
+            hints=speech_hints,
         )
         if audio_url:
             gather.play(audio_url)
@@ -511,7 +563,7 @@ async def make_twiml_response(
             timeout=gather_timeout,
             speech_timeout="auto",
             language="en-IN",
-            hints=SPEECH_HINTS,
+            hints=speech_hints,
         )
         retry_gather.say(SILENCE_REPROMPT, voice="Polly.Aditi", language="en-IN")
         vr.append(retry_gather)
@@ -585,9 +637,13 @@ async def voice_answer(request: Request):
     if not verify_twilio_request(request, form):
         return Response(status_code=403)
     call_sid = form.get("CallSid", "unknown")
+    user_id = _remember_voice_user(call_sid, form.get("From", ""))
 
     twiml = await make_twiml_response(
-        GREETING, session_id=call_sid, base_url=resolve_base_url(request)
+        GREETING,
+        session_id=call_sid,
+        base_url=resolve_base_url(request),
+        user_id=user_id,
     )
     return Response(content=twiml, media_type="application/xml")
 
@@ -602,6 +658,7 @@ async def voice_process(request: Request):
     if not verify_twilio_request(request, form):
         return Response(status_code=403)
     call_sid = form.get("CallSid", "unknown")
+    user_id = _remember_voice_user(call_sid, form.get("From", ""))
     speech_result = form.get("SpeechResult", "")
     confidence = float(form.get("Confidence", 0))
     log_voice_input(call_sid, speech_result, confidence)
@@ -616,6 +673,7 @@ async def voice_process(request: Request):
         vr.say("Alright, no problem. Call back anytime. Goodbye!", voice="Polly.Aditi", language="en-IN")
         vr.hangup()
         clear_session(call_sid)
+        _forget_voice_user(call_sid)
         return Response(content=str(vr), media_type="application/xml")
 
     base_url = resolve_base_url(request)
@@ -626,6 +684,7 @@ async def voice_process(request: Request):
             "I'm here. What Instamart items should I get for you?",
             session_id=call_sid,
             base_url=base_url,
+            user_id=user_id,
         )
         return Response(content=twiml, media_type="application/xml")
 
@@ -636,10 +695,11 @@ async def voice_process(request: Request):
             session_id=call_sid,
             gather_timeout=DEFAULT_GATHER_TIMEOUT,
             base_url=base_url,
+            user_id=user_id,
         )
         return Response(content=twiml, media_type="application/xml")
 
-    start_voice_agent_job(call_sid, speech_result)
+    start_voice_agent_job(call_sid, speech_result, user_id)
     twiml = make_voice_waiting_twiml(
         call_sid, "Checking Instamart now. One moment.", base_url=base_url
     )
@@ -659,6 +719,7 @@ async def voice_result(request: Request):
         poll = 1
 
     base_url = resolve_base_url(request)
+    user_id = _voice_user_ids.get(call_sid, call_sid)
 
     result = _voice_agent_results.pop(call_sid, None)
     if result:
@@ -676,6 +737,7 @@ async def voice_result(request: Request):
             is_final=final,
             gather_timeout=DEFAULT_GATHER_TIMEOUT,
             base_url=base_url,
+            user_id=user_id,
         )
         return Response(content=twiml, media_type="application/xml")
 
@@ -695,6 +757,7 @@ async def voice_result(request: Request):
         session_id=call_sid,
         gather_timeout=DEFAULT_GATHER_TIMEOUT,
         base_url=base_url,
+        user_id=user_id,
     )
     return Response(content=twiml, media_type="application/xml")
 
@@ -709,4 +772,5 @@ async def voice_status(request: Request):
     call_status = form.get("CallStatus", "")
     if call_status in ("completed", "failed", "busy", "no-answer"):
         clear_session(call_sid)
+        _forget_voice_user(call_sid)
     return Response(status_code=204)
