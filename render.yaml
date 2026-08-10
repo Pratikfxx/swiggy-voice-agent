@@ -33,6 +33,8 @@ services:
         sync: false
       - key: SWIGGY_MCP_BASE_URL
         sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
       - key: TWILIO_ACCOUNT_SID
         sync: false
       - key: TWILIO_AUTH_TOKEN
