@@ -58,6 +58,23 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
         for stale in ("dosa", "burger", "biryani"):
             self.assertNotIn(stale, twiml)
 
+    def test_twilio_fallback_uses_neural_voice_by_default_and_respects_override(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TWILIO_TTS_VOICE", None)
+            default_voice_handler = _fresh_voice_handler()
+        default_twiml = default_voice_handler.make_voice_waiting_twiml(
+            "default-call", "Checking Instamart."
+        )
+        self.assertIn('voice="Polly.Kajal-Neural"', default_twiml)
+
+        with patch.dict(os.environ, {"TWILIO_TTS_VOICE": "Polly.Aditi"}, clear=False):
+            override_voice_handler = _fresh_voice_handler()
+        override_twiml = override_voice_handler.make_voice_waiting_twiml(
+            "override-call", "Checking Instamart."
+        )
+        self.assertIn('voice="Polly.Aditi"', override_twiml)
+        self.assertNotIn('voice="Polly.Kajal-Neural"', override_twiml)
+
     def test_voice_turn_logging_uses_visible_uvicorn_logger(self):
         voice_handler = _fresh_voice_handler()
 

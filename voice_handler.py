@@ -78,6 +78,8 @@ load_dotenv()
 router = APIRouter(prefix="/voice", tags=["voice"])
 voice_logger = logging.getLogger("uvicorn.error")
 
+TWILIO_TTS_VOICE = os.getenv("TWILIO_TTS_VOICE", "Polly.Kajal-Neural")
+TWILIO_TTS_LANGUAGE = os.getenv("TWILIO_TTS_LANGUAGE", "en-IN")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 SPEECH_HINTS = ",".join(
@@ -419,7 +421,7 @@ def make_voice_waiting_twiml(
     call_sid: str, message: str, poll: int = 1, base_url: Optional[str] = None
 ) -> str:
     vr = VoiceResponse()
-    vr.say(message, voice="Polly.Aditi", language="en-IN")
+    vr.say(message, voice=TWILIO_TTS_VOICE, language=TWILIO_TTS_LANGUAGE)
     # Longer hold between polls means fewer filler lines over the same wait.
     vr.pause(length=2)
     base = (base_url or get_base_url()).rstrip("/")
@@ -537,7 +539,7 @@ async def make_twiml_response(
         if audio_url:
             vr.play(audio_url)
         else:
-            vr.say(spoken_text, voice="Polly.Aditi", language="en-IN")
+            vr.say(spoken_text, voice=TWILIO_TTS_VOICE, language=TWILIO_TTS_LANGUAGE)
         vr.hangup()
     else:
         speech_hints = _speech_hints(user_id)
@@ -547,13 +549,13 @@ async def make_twiml_response(
             method="POST",
             timeout=gather_timeout,
             speech_timeout="auto",
-            language="en-IN",
+            language=TWILIO_TTS_LANGUAGE,
             hints=speech_hints,
         )
         if audio_url:
             gather.play(audio_url)
         else:
-            gather.say(spoken_text, voice="Polly.Aditi", language="en-IN")
+            gather.say(spoken_text, voice=TWILIO_TTS_VOICE, language=TWILIO_TTS_LANGUAGE)
         vr.append(gather)
 
         retry_gather = Gather(
@@ -562,10 +564,12 @@ async def make_twiml_response(
             method="POST",
             timeout=gather_timeout,
             speech_timeout="auto",
-            language="en-IN",
+            language=TWILIO_TTS_LANGUAGE,
             hints=speech_hints,
         )
-        retry_gather.say(SILENCE_REPROMPT, voice="Polly.Aditi", language="en-IN")
+        retry_gather.say(
+            SILENCE_REPROMPT, voice=TWILIO_TTS_VOICE, language=TWILIO_TTS_LANGUAGE
+        )
         vr.append(retry_gather)
 
     return str(vr)
@@ -670,7 +674,11 @@ async def voice_process(request: Request):
     # Farewell check
     if is_farewell(speech_result):
         vr = VoiceResponse()
-        vr.say("Alright, no problem. Call back anytime. Goodbye!", voice="Polly.Aditi", language="en-IN")
+        vr.say(
+            "Alright, no problem. Call back anytime. Goodbye!",
+            voice=TWILIO_TTS_VOICE,
+            language=TWILIO_TTS_LANGUAGE,
+        )
         vr.hangup()
         clear_session(call_sid)
         _forget_voice_user(call_sid)
