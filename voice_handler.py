@@ -19,6 +19,7 @@ import hashlib
 import json
 import asyncio
 import httpx
+from collections import OrderedDict
 from urllib.parse import quote, urlparse
 from typing import Optional
 from fastapi import APIRouter, Request, Form
@@ -26,12 +27,11 @@ from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse, Gather, Say, Play, Hangup
 from dotenv import load_dotenv
 
-from agent import process_message, clear_session
+from agent import CONFIRM_RE, DEMO_MODE, process_message, clear_session
 from twilio_security import verify_twilio_request
 
 
 _FAREWELL_RE = re.compile(r"\b(bye|goodbye|good bye|cancel|hang up|end call|band karo|band kar do|stop)\b", re.I)
-_VOICE_CONFIRM_RE = re.compile(r"\b(yes|yeah|yep|haan|haa|ha|okay|ok|confirm|theek hai|thik hai|sure|go ahead)\b", re.I)
 _VOICE_ITEM_COMMAND_RE = re.compile(
     r"\b(get|bring|add|order|need|want|me|please|some|a|an|the|from|on|swiggy|instamart|grocery|groceries|items?)\b",
     re.I,
@@ -225,12 +225,27 @@ def resolve_base_url(request: Optional[Request] = None) -> str:
 # TTS cache — remembers which phrases we already rendered to /tmp. Stores the
 # cache key, not a full URL: the base URL can change between calls (tunnel
 # restart), which would make a cached absolute URL point at a dead host.
-_tts_cache: set[str] = set()
+try:
+    TTS_CACHE_MAX = max(1, int(os.getenv("TTS_CACHE_MAX", "200")))
+except ValueError:
+    TTS_CACHE_MAX = 200
+_tts_cache: OrderedDict[str, None] = OrderedDict()
 _voice_fast_pending: dict[str, str] = {}
 _voice_agent_tasks: dict[str, asyncio.Task] = {}
 _voice_agent_results: dict[str, dict] = {}
 _voice_agent_job_ids: dict[str, int] = {}
 _voice_agent_next_job_id = 0
+
+
+def _remember_tts(cache_key: str) -> None:
+    _tts_cache[cache_key] = None
+    _tts_cache.move_to_end(cache_key)
+    while len(_tts_cache) > TTS_CACHE_MAX:
+        evicted_key, _ = _tts_cache.popitem(last=False)
+        try:
+            os.remove(f"/tmp/tts_{evicted_key}.mp3")
+        except OSError:
+            pass
 
 
 def log_voice_input(call_sid: str, speech_result: str, confidence: float) -> None:
@@ -263,7 +278,7 @@ def _fast_voice_reply_or_message(call_sid: str, speech_result: str) -> tuple[str
     pending_item = _voice_fast_pending.get(call_sid)
     if pending_item:
         _voice_fast_pending.pop(call_sid, None)
-        if _VOICE_CONFIRM_RE.search(speech_result or ""):
+        if CONFIRM_RE.search(speech_result or ""):
             voice_logger.info("VOICE fast pending call=%s item=%r", call_sid, pending_item)
             return "", f"get {pending_item}"
 
@@ -282,15 +297,18 @@ def _fast_voice_reply_or_message(call_sid: str, speech_result: str) -> tuple[str
     return reply, speech_result
 
 
-async def run_voice_agent_with_deadline(call_sid: str, speech_result: str) -> tuple[str, float, bool]:
+async def run_voice_agent_with_deadline(
+    call_sid: str, speech_result: str, return_meta: bool = False
+):
     start = time.monotonic()
     try:
-        agent_response = await asyncio.wait_for(
+        agent_result = await asyncio.wait_for(
             asyncio.to_thread(
                 process_message,
                 session_id=call_sid,
                 user_message=speech_result,
                 surface="voice",
+                return_meta=return_meta,
             ),
             timeout=VOICE_AGENT_TIMEOUT_SECS,
         )
@@ -302,16 +320,25 @@ async def run_voice_agent_with_deadline(call_sid: str, speech_result: str) -> tu
             elapsed,
             speech_result,
         )
+        if return_meta:
+            return VOICE_AGENT_TIMEOUT_MESSAGE, elapsed, True, {"order_placed": False}
         return VOICE_AGENT_TIMEOUT_MESSAGE, elapsed, True
 
     elapsed = time.monotonic() - start
-    return agent_response, elapsed, False
+    if not return_meta:
+        return agent_result, elapsed, False
+    if isinstance(agent_result, tuple) and len(agent_result) == 2:
+        return agent_result[0], elapsed, False, agent_result[1]
+    return agent_result, elapsed, False, {"order_placed": False}
 
 
 async def _run_voice_agent_background(call_sid: str, speech_result: str, job_id: int) -> None:
     try:
-        agent_response, elapsed, timed_out = await run_voice_agent_with_deadline(call_sid, speech_result)
-        final = False if timed_out else is_order_complete(agent_response)
+        agent_response, elapsed, timed_out, meta = await run_voice_agent_with_deadline(
+            call_sid, speech_result, return_meta=True
+        )
+        order_placed = bool(meta.get("order_placed", False))
+        final = False if timed_out else order_placed or (DEMO_MODE and is_order_complete(agent_response))
         result = {
             "response": agent_response,
             "elapsed": elapsed,
@@ -384,6 +411,7 @@ async def generate_tts_audio(text: str, base_url: Optional[str] = None) -> Optio
     base = (base_url or get_base_url()).rstrip("/")
     cache_key = hashlib.md5(text.encode()).hexdigest()
     if cache_key in _tts_cache:
+        _tts_cache.move_to_end(cache_key)
         return f"{base}/audio/{cache_key}"
 
     try:
@@ -408,7 +436,7 @@ async def generate_tts_audio(text: str, base_url: Optional[str] = None) -> Optio
             audio_path = f"/tmp/tts_{cache_key}.mp3"
             with open(audio_path, "wb") as f:
                 f.write(response.content)
-            _tts_cache.add(cache_key)
+            _remember_tts(cache_key)
             return f"{base}/audio/{cache_key}"
         else:
             status = _elevenlabs_error_status(response.text)

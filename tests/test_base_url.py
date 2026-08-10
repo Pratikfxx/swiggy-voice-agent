@@ -91,10 +91,28 @@ class ResolveBaseUrlTests(unittest.TestCase):
 
 
 class TtsCacheTests(unittest.IsolatedAsyncioTestCase):
+    def test_tts_cache_evicts_lru_file_and_ignores_delete_failure(self):
+        vh = _fresh_voice_handler()
+
+        with patch.object(vh, "TTS_CACHE_MAX", 2), patch.object(vh.os, "remove") as remove:
+            vh._remember_tts("old")
+            vh._remember_tts("new")
+            vh._tts_cache.move_to_end("old")
+            vh._remember_tts("latest")
+
+        self.assertEqual(list(vh._tts_cache), ["old", "latest"])
+        remove.assert_called_once_with("/tmp/tts_new.mp3")
+
+        with (
+            patch.object(vh, "TTS_CACHE_MAX", 1),
+            patch.object(vh.os, "remove", side_effect=OSError("locked")),
+        ):
+            vh._remember_tts("final")
+
     async def test_cached_audio_url_follows_current_base_url(self):
         """A cached phrase must not pin the URL to a dead tunnel host."""
         vh = _fresh_voice_handler()
-        vh._tts_cache.add("deadbeef")
+        vh._tts_cache["deadbeef"] = None
 
         with (
             patch.object(vh.hashlib, "md5") as md5,

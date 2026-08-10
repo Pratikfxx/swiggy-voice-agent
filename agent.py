@@ -622,6 +622,12 @@ def _spend_server_for_tool(tool_name: str) -> str:
     return ""
 
 
+def _agent_result(response_text, messages, order_placed=False, return_meta=False):
+    if return_meta:
+        return response_text, messages, {"order_placed": order_placed}
+    return response_text, messages
+
+
 def _model_for(surface):
     return VOICE_MODEL if surface == "voice" else AGENT_MODEL
 
@@ -802,10 +808,7 @@ def _live_order_summary(tool_name: str, tool_input: dict) -> tuple[str, str, lis
     return order_type, summary, items, restaurant_name, total_amount
 
 
-def _save_live_order_if_any(content_blocks: list, session_id: str) -> None:
-    if not session_id:
-        return
-
+def _save_live_order_if_any(content_blocks: list, session_id: str) -> bool:
     pending_spend_tools = {}
     last_pending_spend_tool = None
     for block in content_blocks:
@@ -829,17 +832,19 @@ def _save_live_order_if_any(content_blocks: list, session_id: str) -> None:
                     _block_value(tool_use, "name", ""),
                     _block_value(tool_use, "input", {}),
                 )
-                save_order(
-                    session_id=session_id,
-                    order_type=order_type,
-                    summary=summary,
-                    items=items,
-                    restaurant_name=restaurant_name,
-                    total_amount=total_amount,
-                )
+                if session_id:
+                    save_order(
+                        session_id=session_id,
+                        order_type=order_type,
+                        summary=summary,
+                        items=items,
+                        restaurant_name=restaurant_name,
+                        total_amount=total_amount,
+                    )
             except Exception:
                 logging.exception("Failed to save live Swiggy order history")
-            return
+            return True
+    return False
 
 
 # ─────────────────────────────────────────────
@@ -850,7 +855,8 @@ def _run_agent_demo(
     user_message: str,
     conversation_history: list[dict],
     surface: str = "voice",
-    session_id: str = ""
+    session_id: str = "",
+    return_meta: bool = False,
 ) -> tuple[str, list[dict]]:
     system_prompt = VOICE_SYSTEM_PROMPT if surface == "voice" else CHAT_SYSTEM_PROMPT
     messages = conversation_history + [{"role": "user", "content": user_message}]
@@ -867,13 +873,13 @@ def _run_agent_demo(
         )
         if response.stop_reason == "refusal":
             messages.append({"role": "assistant", "content": REFUSAL_MESSAGE})
-            return REFUSAL_MESSAGE, messages
+            return _agent_result(REFUSAL_MESSAGE, messages, return_meta=return_meta)
         text_blocks = [b.text for b in response.content if hasattr(b, "text")]
         tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason == "end_turn" or not tool_use_blocks:
-            return " ".join(text_blocks).strip(), messages
+            return _agent_result(" ".join(text_blocks).strip(), messages, return_meta=return_meta)
 
         tool_results = [
             {
@@ -885,7 +891,9 @@ def _run_agent_demo(
         ]
         messages.append({"role": "user", "content": tool_results})
 
-    return "Sorry, something went wrong. Please try again.", messages
+    return _agent_result(
+        "Sorry, something went wrong. Please try again.", messages, return_meta=return_meta
+    )
 
 
 def _run_agent_live(
@@ -894,8 +902,10 @@ def _run_agent_live(
     surface: str,
     session_id: str,
     tokens: dict[str, str],
+    return_meta: bool = False,
 ) -> tuple[str, list[dict]]:
     messages = conversation_history + [{"role": "user", "content": user_message}]
+    order_placed = False
 
     try:
         system_prompt = (
@@ -1004,13 +1014,13 @@ def _run_agent_live(
             if isinstance(content, str):
                 continue
             assistant_blocks.extend(content or [])
-        _save_live_order_if_any(assistant_blocks, session_id)
+        order_placed = _save_live_order_if_any(assistant_blocks, session_id)
 
         # Whole-chain refusal (Fable declined and fallback declined too, or no
         # fallback configured) — content is empty or partial, don't read it.
         if response is not None and response.stop_reason == "refusal":
             messages.append({"role": "assistant", "content": REFUSAL_MESSAGE})
-            return REFUSAL_MESSAGE, messages
+            return _agent_result(REFUSAL_MESSAGE, messages, order_placed, return_meta)
 
         final_text = ""
         for message in reversed(messages):
@@ -1018,20 +1028,30 @@ def _run_agent_live(
                 final_text = _content_text(message.get("content"))
                 break
 
-        return final_text or "Done. Please check Swiggy for the latest status.", messages
+        return _agent_result(
+            final_text or "Done. Please check Swiggy for the latest status.",
+            messages,
+            order_placed,
+            return_meta,
+        )
 
     except Exception:
         logging.exception("Swiggy live agent failed")
         if _is_confirmation(user_message):
-            return LIVE_CHECKOUT_UNCERTAIN_MESSAGE, messages
-        return LIVE_GENERIC_FAILURE_MESSAGE, messages
+            return _agent_result(
+                LIVE_CHECKOUT_UNCERTAIN_MESSAGE, messages, order_placed, return_meta
+            )
+        return _agent_result(
+            LIVE_GENERIC_FAILURE_MESSAGE, messages, order_placed, return_meta
+        )
 
 
 def run_agent(
     user_message: str,
     conversation_history: list[dict],
     surface: str = "voice",  # "voice" or "chat"
-    session_id: str = ""
+    session_id: str = "",
+    return_meta: bool = False,
 ) -> tuple[str, list[dict]]:
     """
     Run one turn of the agent.
@@ -1045,7 +1065,9 @@ def run_agent(
         (agent_response_text, updated_conversation_history)
     """
     if DEMO_MODE:
-        return _run_agent_demo(user_message, conversation_history, surface, session_id)
+        return _run_agent_demo(
+            user_message, conversation_history, surface, session_id, return_meta
+        )
 
     try:
         tokens = get_access_tokens(ACTIVE_TOKEN_KEYS)
@@ -1055,9 +1077,11 @@ def run_agent(
             {"role": "user", "content": user_message},
             {"role": "assistant", "content": LIVE_AUTH_NOT_READY_MESSAGE},
         ]
-        return LIVE_AUTH_NOT_READY_MESSAGE, messages
+        return _agent_result(LIVE_AUTH_NOT_READY_MESSAGE, messages, return_meta=return_meta)
 
-    return _run_agent_live(user_message, conversation_history, surface, session_id, tokens)
+    return _run_agent_live(
+        user_message, conversation_history, surface, session_id, tokens, return_meta
+    )
 
 
 # ─────────────────────────────────────────────
@@ -1142,13 +1166,22 @@ def clear_session(session_id: str) -> None:
 def process_message(
     session_id: str,
     user_message: str,
-    surface: str = "voice"
-) -> str:
+    surface: str = "voice",
+    *,
+    return_meta: bool = False,
+):
     """
     High-level entry point.
     Takes a session ID + user message, returns agent response string.
     """
     history = get_session(session_id)
-    response_text, updated_history = run_agent(user_message, history, surface, session_id=session_id)
+    result = run_agent(
+        user_message,
+        history,
+        surface,
+        session_id=session_id,
+        return_meta=return_meta,
+    )
+    response_text, updated_history = result[:2]
     update_session(session_id, updated_history)
-    return response_text
+    return (response_text, result[2]) if return_meta else response_text

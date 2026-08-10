@@ -25,6 +25,25 @@ def _fresh_agent():
 
 
 class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_order_completion_uses_tool_metadata_not_reply_prose(self):
+        voice_handler = _fresh_voice_handler()
+
+        def fake_process_message(*args, **kwargs):
+            self.assertTrue(kwargs["return_meta"])
+            placed = kwargs["session_id"] == "placed-call"
+            return "Your request was accepted.", {"order_placed": placed}
+
+        with (
+            patch.object(voice_handler, "process_message", side_effect=fake_process_message),
+            patch.object(voice_handler, "DEMO_MODE", False, create=True),
+        ):
+            voice_handler._voice_agent_job_ids.update({"placed-call": 1, "failed-call": 1})
+            await voice_handler._run_voice_agent_background("placed-call", "yes", 1)
+            await voice_handler._run_voice_agent_background("failed-call", "yes", 1)
+
+        self.assertTrue(voice_handler._voice_agent_results["placed-call"]["final"])
+        self.assertFalse(voice_handler._voice_agent_results["failed-call"]["final"])
+
     async def test_gather_hints_cover_common_instamart_orders(self):
         voice_handler = _fresh_voice_handler()
 
