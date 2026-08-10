@@ -14,30 +14,24 @@ Routes:
 import logging
 import os
 from pathlib import Path
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from dotenv import load_dotenv
 
+from agent import DEMO_MODE
 import swiggy_auth
 import swiggy_address
 from swiggy_scope import ACTIVE_TOKEN_KEYS
 from voice_handler import router as voice_router, prewarm_tts
+from voice_stream import router as voice_stream_router
 from whatsapp_handler import router as whatsapp_router
+from swiggy_link import router as swiggy_link_router
 
 load_dotenv()
 
-app = FastAPI(
-    title="Swiggy Voice Agent",
-    description="Order food and groceries via phone call or WhatsApp",
-    version="1.0.0"
-)
-
-app.include_router(voice_router)
-app.include_router(whatsapp_router)
-
-
-@app.on_event("startup")
-async def _warm():
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     try:
         await swiggy_address.refresh_default_address()
     except Exception:
@@ -46,6 +40,20 @@ async def _warm():
         await prewarm_tts()
     except Exception:
         logging.exception("startup TTS pre-warm failed")
+    yield
+
+
+app = FastAPI(
+    title="Swiggy Voice Agent",
+    description="Order food and groceries via phone call or WhatsApp",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.include_router(voice_router)
+app.include_router(voice_stream_router)
+app.include_router(whatsapp_router)
+app.include_router(swiggy_link_router)
 
 
 @app.get("/health")
@@ -64,7 +72,7 @@ def health():
 
     return {
         "status": "ok",
-        "demo_mode": os.getenv("DEMO_MODE", "true"),
+        "demo_mode": str(DEMO_MODE).lower(),
         "anthropic": bool(os.getenv("ANTHROPIC_API_KEY")),
         "twilio": bool(os.getenv("TWILIO_ACCOUNT_SID")),
         "elevenlabs": bool(os.getenv("ELEVENLABS_API_KEY")),
@@ -88,7 +96,7 @@ def demo_page():
     phone = os.getenv("TWILIO_PHONE_NUMBER", "Not configured")
     wa = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886").replace("whatsapp:", "")
     base_url = os.getenv("BASE_URL", "http://localhost:8000")
-    demo_mode = os.getenv("DEMO_MODE", "true")
+    demo_mode = str(DEMO_MODE).lower()
 
     return f"""
     <!DOCTYPE html>

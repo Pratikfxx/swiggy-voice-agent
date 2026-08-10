@@ -19,6 +19,7 @@ import hashlib
 import json
 import asyncio
 import httpx
+from collections import OrderedDict
 from urllib.parse import quote, urlparse
 from typing import Optional
 from fastapi import APIRouter, Request, Form
@@ -26,12 +27,12 @@ from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse, Gather, Say, Play, Hangup
 from dotenv import load_dotenv
 
-from agent import process_message, clear_session
+from agent import CONFIRM_RE, DEMO_MODE, normalize_user_id, process_message, clear_session
+from order_history import get_recent_orders
 from twilio_security import verify_twilio_request
 
 
 _FAREWELL_RE = re.compile(r"\b(bye|goodbye|good bye|cancel|hang up|end call|band karo|band kar do|stop)\b", re.I)
-_VOICE_CONFIRM_RE = re.compile(r"\b(yes|yeah|yep|haan|haa|ha|okay|ok|confirm|theek hai|thik hai|sure|go ahead)\b", re.I)
 _VOICE_ITEM_COMMAND_RE = re.compile(
     r"\b(get|bring|add|order|need|want|me|please|some|a|an|the|from|on|swiggy|instamart|grocery|groceries|items?)\b",
     re.I,
@@ -77,6 +78,8 @@ load_dotenv()
 router = APIRouter(prefix="/voice", tags=["voice"])
 voice_logger = logging.getLogger("uvicorn.error")
 
+TWILIO_TTS_VOICE = os.getenv("TWILIO_TTS_VOICE", "Polly.Kajal-Neural")
+TWILIO_TTS_LANGUAGE = os.getenv("TWILIO_TTS_LANGUAGE", "en-IN")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 SPEECH_HINTS = ",".join(
@@ -121,6 +124,7 @@ SPEECH_HINTS = ",".join(
         "toothpaste",
     ]
 )
+_STATIC_SPEECH_HINTS = SPEECH_HINTS.split(",")
 
 # Circuit breaker — skip ElevenLabs after repeated 4xx failures
 _el_failures = 0
@@ -225,12 +229,65 @@ def resolve_base_url(request: Optional[Request] = None) -> str:
 # TTS cache — remembers which phrases we already rendered to /tmp. Stores the
 # cache key, not a full URL: the base URL can change between calls (tunnel
 # restart), which would make a cached absolute URL point at a dead host.
-_tts_cache: set[str] = set()
+try:
+    TTS_CACHE_MAX = max(1, int(os.getenv("TTS_CACHE_MAX", "200")))
+except ValueError:
+    TTS_CACHE_MAX = 200
+_tts_cache: OrderedDict[str, None] = OrderedDict()
 _voice_fast_pending: dict[str, str] = {}
+_voice_user_ids: OrderedDict[str, str] = OrderedDict()
+_VOICE_USER_CACHE_MAX = 1000
 _voice_agent_tasks: dict[str, asyncio.Task] = {}
 _voice_agent_results: dict[str, dict] = {}
 _voice_agent_job_ids: dict[str, int] = {}
 _voice_agent_next_job_id = 0
+
+
+def _remember_voice_user(call_sid: str, from_number: str) -> str:
+    user_id = normalize_user_id(from_number) if from_number else ""
+    if not user_id:
+        user_id = _voice_user_ids.get(call_sid, call_sid)
+    _voice_user_ids.pop(call_sid, None)
+    _voice_user_ids[call_sid] = user_id
+    while len(_voice_user_ids) > _VOICE_USER_CACHE_MAX:
+        _voice_user_ids.popitem(last=False)
+    return user_id
+
+
+def _forget_voice_user(call_sid: str) -> None:
+    _voice_user_ids.pop(call_sid, None)
+
+
+def _speech_hints(user_id: str) -> str:
+    hints = list(_STATIC_SPEECH_HINTS)
+    seen = {hint.casefold() for hint in hints}
+    try:
+        orders = get_recent_orders(user_id, limit=5) if user_id else []
+        for order in orders:
+            for item in order.get("items", []):
+                name = item.get("name", "") if isinstance(item, dict) else ""
+                name = str(name).strip()
+                if not name or name.casefold() in seen:
+                    continue
+                seen.add(name.casefold())
+                hints.append(name)
+                if len(hints) == 100:
+                    return ",".join(hints)
+    except Exception:
+        voice_logger.warning("voice speech hint history lookup failed", exc_info=True)
+        return SPEECH_HINTS
+    return ",".join(hints)
+
+
+def _remember_tts(cache_key: str) -> None:
+    _tts_cache[cache_key] = None
+    _tts_cache.move_to_end(cache_key)
+    while len(_tts_cache) > TTS_CACHE_MAX:
+        evicted_key, _ = _tts_cache.popitem(last=False)
+        try:
+            os.remove(f"/tmp/tts_{evicted_key}.mp3")
+        except OSError:
+            pass
 
 
 def log_voice_input(call_sid: str, speech_result: str, confidence: float) -> None:
@@ -263,7 +320,7 @@ def _fast_voice_reply_or_message(call_sid: str, speech_result: str) -> tuple[str
     pending_item = _voice_fast_pending.get(call_sid)
     if pending_item:
         _voice_fast_pending.pop(call_sid, None)
-        if _VOICE_CONFIRM_RE.search(speech_result or ""):
+        if CONFIRM_RE.search(speech_result or ""):
             voice_logger.info("VOICE fast pending call=%s item=%r", call_sid, pending_item)
             return "", f"get {pending_item}"
 
@@ -282,15 +339,23 @@ def _fast_voice_reply_or_message(call_sid: str, speech_result: str) -> tuple[str
     return reply, speech_result
 
 
-async def run_voice_agent_with_deadline(call_sid: str, speech_result: str) -> tuple[str, float, bool]:
+async def run_voice_agent_with_deadline(
+    call_sid: str,
+    speech_result: str,
+    return_meta: bool = False,
+    user_id: str = "",
+):
     start = time.monotonic()
+    user_id = user_id or _voice_user_ids.get(call_sid, call_sid)
     try:
-        agent_response = await asyncio.wait_for(
+        agent_result = await asyncio.wait_for(
             asyncio.to_thread(
                 process_message,
                 session_id=call_sid,
                 user_message=speech_result,
                 surface="voice",
+                return_meta=return_meta,
+                user_id=user_id,
             ),
             timeout=VOICE_AGENT_TIMEOUT_SECS,
         )
@@ -302,16 +367,27 @@ async def run_voice_agent_with_deadline(call_sid: str, speech_result: str) -> tu
             elapsed,
             speech_result,
         )
+        if return_meta:
+            return VOICE_AGENT_TIMEOUT_MESSAGE, elapsed, True, {"order_placed": False}
         return VOICE_AGENT_TIMEOUT_MESSAGE, elapsed, True
 
     elapsed = time.monotonic() - start
-    return agent_response, elapsed, False
+    if not return_meta:
+        return agent_result, elapsed, False
+    if isinstance(agent_result, tuple) and len(agent_result) == 2:
+        return agent_result[0], elapsed, False, agent_result[1]
+    return agent_result, elapsed, False, {"order_placed": False}
 
 
-async def _run_voice_agent_background(call_sid: str, speech_result: str, job_id: int) -> None:
+async def _run_voice_agent_background(
+    call_sid: str, speech_result: str, job_id: int, user_id: str = ""
+) -> None:
     try:
-        agent_response, elapsed, timed_out = await run_voice_agent_with_deadline(call_sid, speech_result)
-        final = False if timed_out else is_order_complete(agent_response)
+        agent_response, elapsed, timed_out, meta = await run_voice_agent_with_deadline(
+            call_sid, speech_result, return_meta=True, user_id=user_id
+        )
+        order_placed = bool(meta.get("order_placed", False))
+        final = False if timed_out else order_placed or (DEMO_MODE and is_order_complete(agent_response))
         result = {
             "response": agent_response,
             "elapsed": elapsed,
@@ -330,14 +406,14 @@ async def _run_voice_agent_background(call_sid: str, speech_result: str, job_id:
         _voice_agent_tasks.pop(call_sid, None)
 
 
-def start_voice_agent_job(call_sid: str, speech_result: str) -> None:
+def start_voice_agent_job(call_sid: str, speech_result: str, user_id: str = "") -> None:
     global _voice_agent_next_job_id
     _voice_agent_next_job_id += 1
     job_id = _voice_agent_next_job_id
     _voice_agent_job_ids[call_sid] = job_id
     _voice_agent_results.pop(call_sid, None)
     _voice_agent_tasks[call_sid] = asyncio.create_task(
-        _run_voice_agent_background(call_sid, speech_result, job_id)
+        _run_voice_agent_background(call_sid, speech_result, job_id, user_id)
     )
 
 
@@ -345,7 +421,7 @@ def make_voice_waiting_twiml(
     call_sid: str, message: str, poll: int = 1, base_url: Optional[str] = None
 ) -> str:
     vr = VoiceResponse()
-    vr.say(message, voice="Polly.Aditi", language="en-IN")
+    vr.say(message, voice=TWILIO_TTS_VOICE, language=TWILIO_TTS_LANGUAGE)
     # Longer hold between polls means fewer filler lines over the same wait.
     vr.pause(length=2)
     base = (base_url or get_base_url()).rstrip("/")
@@ -384,6 +460,7 @@ async def generate_tts_audio(text: str, base_url: Optional[str] = None) -> Optio
     base = (base_url or get_base_url()).rstrip("/")
     cache_key = hashlib.md5(text.encode()).hexdigest()
     if cache_key in _tts_cache:
+        _tts_cache.move_to_end(cache_key)
         return f"{base}/audio/{cache_key}"
 
     try:
@@ -408,7 +485,7 @@ async def generate_tts_audio(text: str, base_url: Optional[str] = None) -> Optio
             audio_path = f"/tmp/tts_{cache_key}.mp3"
             with open(audio_path, "wb") as f:
                 f.write(response.content)
-            _tts_cache.add(cache_key)
+            _remember_tts(cache_key)
             return f"{base}/audio/{cache_key}"
         else:
             status = _elevenlabs_error_status(response.text)
@@ -437,6 +514,7 @@ async def make_twiml_response(
     is_final: bool = False,
     gather_timeout: int = DEFAULT_GATHER_TIMEOUT,
     base_url: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> str:
     """
     Build TwiML response that speaks agent_text then either:
@@ -450,6 +528,9 @@ async def make_twiml_response(
     spoken_text = clean_for_voice(agent_text)
 
     base = (base_url or get_base_url()).rstrip("/")
+    user_id = normalize_user_id(
+        user_id or _voice_user_ids.get(session_id, session_id)
+    )
 
     # Try ElevenLabs TTS first, fall back to Twilio <Say>
     audio_url = await generate_tts_audio(spoken_text, base_url=base)
@@ -458,22 +539,23 @@ async def make_twiml_response(
         if audio_url:
             vr.play(audio_url)
         else:
-            vr.say(spoken_text, voice="Polly.Aditi", language="en-IN")
+            vr.say(spoken_text, voice=TWILIO_TTS_VOICE, language=TWILIO_TTS_LANGUAGE)
         vr.hangup()
     else:
+        speech_hints = _speech_hints(user_id)
         gather = Gather(
             input="speech",
             action=f"{base}/voice/process",
             method="POST",
             timeout=gather_timeout,
             speech_timeout="auto",
-            language="en-IN",
-            hints=SPEECH_HINTS,
+            language=TWILIO_TTS_LANGUAGE,
+            hints=speech_hints,
         )
         if audio_url:
             gather.play(audio_url)
         else:
-            gather.say(spoken_text, voice="Polly.Aditi", language="en-IN")
+            gather.say(spoken_text, voice=TWILIO_TTS_VOICE, language=TWILIO_TTS_LANGUAGE)
         vr.append(gather)
 
         retry_gather = Gather(
@@ -482,10 +564,12 @@ async def make_twiml_response(
             method="POST",
             timeout=gather_timeout,
             speech_timeout="auto",
-            language="en-IN",
-            hints=SPEECH_HINTS,
+            language=TWILIO_TTS_LANGUAGE,
+            hints=speech_hints,
         )
-        retry_gather.say(SILENCE_REPROMPT, voice="Polly.Aditi", language="en-IN")
+        retry_gather.say(
+            SILENCE_REPROMPT, voice=TWILIO_TTS_VOICE, language=TWILIO_TTS_LANGUAGE
+        )
         vr.append(retry_gather)
 
     return str(vr)
@@ -557,9 +641,13 @@ async def voice_answer(request: Request):
     if not verify_twilio_request(request, form):
         return Response(status_code=403)
     call_sid = form.get("CallSid", "unknown")
+    user_id = _remember_voice_user(call_sid, form.get("From", ""))
 
     twiml = await make_twiml_response(
-        GREETING, session_id=call_sid, base_url=resolve_base_url(request)
+        GREETING,
+        session_id=call_sid,
+        base_url=resolve_base_url(request),
+        user_id=user_id,
     )
     return Response(content=twiml, media_type="application/xml")
 
@@ -574,6 +662,7 @@ async def voice_process(request: Request):
     if not verify_twilio_request(request, form):
         return Response(status_code=403)
     call_sid = form.get("CallSid", "unknown")
+    user_id = _remember_voice_user(call_sid, form.get("From", ""))
     speech_result = form.get("SpeechResult", "")
     confidence = float(form.get("Confidence", 0))
     log_voice_input(call_sid, speech_result, confidence)
@@ -585,9 +674,14 @@ async def voice_process(request: Request):
     # Farewell check
     if is_farewell(speech_result):
         vr = VoiceResponse()
-        vr.say("Alright, no problem. Call back anytime. Goodbye!", voice="Polly.Aditi", language="en-IN")
+        vr.say(
+            "Alright, no problem. Call back anytime. Goodbye!",
+            voice=TWILIO_TTS_VOICE,
+            language=TWILIO_TTS_LANGUAGE,
+        )
         vr.hangup()
         clear_session(call_sid)
+        _forget_voice_user(call_sid)
         return Response(content=str(vr), media_type="application/xml")
 
     base_url = resolve_base_url(request)
@@ -598,6 +692,7 @@ async def voice_process(request: Request):
             "I'm here. What Instamart items should I get for you?",
             session_id=call_sid,
             base_url=base_url,
+            user_id=user_id,
         )
         return Response(content=twiml, media_type="application/xml")
 
@@ -608,10 +703,11 @@ async def voice_process(request: Request):
             session_id=call_sid,
             gather_timeout=DEFAULT_GATHER_TIMEOUT,
             base_url=base_url,
+            user_id=user_id,
         )
         return Response(content=twiml, media_type="application/xml")
 
-    start_voice_agent_job(call_sid, speech_result)
+    start_voice_agent_job(call_sid, speech_result, user_id)
     twiml = make_voice_waiting_twiml(
         call_sid, "Checking Instamart now. One moment.", base_url=base_url
     )
@@ -631,6 +727,7 @@ async def voice_result(request: Request):
         poll = 1
 
     base_url = resolve_base_url(request)
+    user_id = _voice_user_ids.get(call_sid, call_sid)
 
     result = _voice_agent_results.pop(call_sid, None)
     if result:
@@ -648,6 +745,7 @@ async def voice_result(request: Request):
             is_final=final,
             gather_timeout=DEFAULT_GATHER_TIMEOUT,
             base_url=base_url,
+            user_id=user_id,
         )
         return Response(content=twiml, media_type="application/xml")
 
@@ -667,6 +765,7 @@ async def voice_result(request: Request):
         session_id=call_sid,
         gather_timeout=DEFAULT_GATHER_TIMEOUT,
         base_url=base_url,
+        user_id=user_id,
     )
     return Response(content=twiml, media_type="application/xml")
 
@@ -681,4 +780,5 @@ async def voice_status(request: Request):
     call_status = form.get("CallStatus", "")
     if call_status in ("completed", "failed", "busy", "no-answer"):
         clear_session(call_sid)
+        _forget_voice_user(call_sid)
     return Response(status_code=204)

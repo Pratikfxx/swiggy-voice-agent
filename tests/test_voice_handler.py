@@ -1,5 +1,6 @@
 import importlib
 import asyncio
+import os
 import sys
 import time
 import unittest
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 
 def _fresh_voice_handler():
+    os.environ["TWILIO_VALIDATE_WEBHOOKS"] = "false"
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=ResourceWarning)
         for name in ("voice_handler", "agent"):
@@ -23,6 +25,25 @@ def _fresh_agent():
 
 
 class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_order_completion_uses_tool_metadata_not_reply_prose(self):
+        voice_handler = _fresh_voice_handler()
+
+        def fake_process_message(*args, **kwargs):
+            self.assertTrue(kwargs["return_meta"])
+            placed = kwargs["session_id"] == "placed-call"
+            return "Your request was accepted.", {"order_placed": placed}
+
+        with (
+            patch.object(voice_handler, "process_message", side_effect=fake_process_message),
+            patch.object(voice_handler, "DEMO_MODE", False, create=True),
+        ):
+            voice_handler._voice_agent_job_ids.update({"placed-call": 1, "failed-call": 1})
+            await voice_handler._run_voice_agent_background("placed-call", "yes", 1)
+            await voice_handler._run_voice_agent_background("failed-call", "yes", 1)
+
+        self.assertTrue(voice_handler._voice_agent_results["placed-call"]["final"])
+        self.assertFalse(voice_handler._voice_agent_results["failed-call"]["final"])
+
     async def test_gather_hints_cover_common_instamart_orders(self):
         voice_handler = _fresh_voice_handler()
 
@@ -36,6 +57,23 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(expected, twiml)
         for stale in ("dosa", "burger", "biryani"):
             self.assertNotIn(stale, twiml)
+
+    def test_twilio_fallback_uses_neural_voice_by_default_and_respects_override(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TWILIO_TTS_VOICE", None)
+            default_voice_handler = _fresh_voice_handler()
+        default_twiml = default_voice_handler.make_voice_waiting_twiml(
+            "default-call", "Checking Instamart."
+        )
+        self.assertIn('voice="Polly.Kajal-Neural"', default_twiml)
+
+        with patch.dict(os.environ, {"TWILIO_TTS_VOICE": "Polly.Aditi"}, clear=False):
+            override_voice_handler = _fresh_voice_handler()
+        override_twiml = override_voice_handler.make_voice_waiting_twiml(
+            "override-call", "Checking Instamart."
+        )
+        self.assertIn('voice="Polly.Aditi"', override_twiml)
+        self.assertNotIn('voice="Polly.Kajal-Neural"', override_twiml)
 
     def test_voice_turn_logging_uses_visible_uvicorn_logger(self):
         voice_handler = _fresh_voice_handler()
@@ -176,7 +214,7 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(voice_handler.VOICE_RESULT_MAX_POLLS, 8)
         self.assertGreaterEqual(voice_handler.VOICE_AGENT_TIMEOUT_SECS, 15)
 
-    async def test_voice_process_acknowledges_multi_item_requests_without_agent_gap(self):
+    async def test_voice_process_starts_background_job_for_multi_item_requests(self):
         voice_handler = _fresh_voice_handler()
 
         class FakeRequest:
@@ -188,21 +226,19 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
                 }
 
         with (
-            patch.object(voice_handler, "process_message") as process_message,
+            patch.object(voice_handler, "process_message", return_value="I found milk and bread. Add these?"),
             patch.object(voice_handler, "generate_tts_audio", return_value=None),
         ):
             start = time.monotonic()
             response = await voice_handler.voice_process(FakeRequest())
             elapsed = time.monotonic() - start
+            await asyncio.sleep(0.05)
 
         twiml = response.body.decode()
-        process_message.assert_not_called()
         self.assertLess(elapsed, 0.05)
-        self.assertIn("one item at a time", twiml)
-        self.assertIn("milk", twiml)
-        self.assertIn("bread", twiml)
-        self.assertIn("<Gather", twiml)
-        self.assertNotIn("<Hangup", twiml)
+        self.assertIn("Checking Instamart", twiml)
+        self.assertIn("/voice/result", twiml)
+        self.assertIn("multi-item-call", voice_handler._voice_agent_results)
 
     async def test_voice_process_consumes_fast_pending_item_on_confirmation(self):
         voice_handler = _fresh_voice_handler()

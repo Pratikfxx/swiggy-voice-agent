@@ -13,11 +13,14 @@ import json
 import os
 import re
 import logging
+from collections import OrderedDict
+from threading import Lock
 
 import anthropic
 
 from recipe_engine import get_recipe_ingredients as _get_recipe_ingredients
 from order_history import save_order, get_recent_orders
+import store
 import swiggy_address
 from swiggy_search import search_and_add_to_cart
 from swiggy_auth import get_access_tokens
@@ -106,6 +109,10 @@ def _route_servers(user_message: str, surface: str) -> list[str]:
 
 def _is_confirmation(text):
     return bool(CONFIRM_RE.search(text or ""))
+
+
+def normalize_user_id(identity: str) -> str:
+    return str(identity or "").removeprefix("whatsapp:")
 
 # ─────────────────────────────────────────────
 # Tool definitions — Claude sees these
@@ -364,8 +371,11 @@ LOCAL_NAMES = {tool["name"] for tool in LIVE_LOCAL_TOOLS}
 # Tool executor — maps tool names → functions
 # ─────────────────────────────────────────────
 
-def execute_tool(tool_name: str, tool_input: dict, session_id: str = "") -> str:
+def execute_tool(
+    tool_name: str, tool_input: dict, session_id: str = "", user_id: str = ""
+) -> str:
     """Execute a tool call and return JSON string result."""
+    user_id = user_id or session_id
     try:
         if tool_name == "get_user_address":
             result = get_saved_address()
@@ -401,14 +411,14 @@ def execute_tool(tool_name: str, tool_input: dict, session_id: str = "") -> str:
                 tool_input["items"]
             )
             # Auto-save to order history on success
-            if session_id and result.get("success"):
+            if user_id and result.get("success"):
                 items = tool_input.get("items", [])
                 summary = (
                     f"{', '.join(i.get('name','') for i in items[:3])}"
                     f" from {tool_input.get('restaurant_name', '')}"
                 )
                 save_order(
-                    session_id=session_id,
+                    session_id=user_id,
                     order_type="food",
                     summary=summary,
                     items=items,
@@ -419,14 +429,14 @@ def execute_tool(tool_name: str, tool_input: dict, session_id: str = "") -> str:
         elif tool_name == "place_grocery_order":
             result = place_instamart_order_mock(tool_input["items"])
             # Auto-save to order history on success
-            if session_id and result.get("success"):
+            if user_id and result.get("success"):
                 items = tool_input.get("items", [])
                 summary = (
                     f"Groceries: {', '.join(i.get('name','') for i in items[:4])}"
                     + (" & more" if len(items) > 4 else "")
                 )
                 save_order(
-                    session_id=session_id,
+                    session_id=user_id,
                     order_type="grocery",
                     summary=summary,
                     items=items,
@@ -455,9 +465,9 @@ def execute_tool(tool_name: str, tool_input: dict, session_id: str = "") -> str:
                 tool_input["guests"]
             )
             # Auto-save dineout booking on success
-            if session_id and result.get("success"):
+            if user_id and result.get("success"):
                 save_order(
-                    session_id=session_id,
+                    session_id=user_id,
                     order_type="dineout",
                     summary=(
                         f"Table for {tool_input.get('guests')} "
@@ -470,7 +480,7 @@ def execute_tool(tool_name: str, tool_input: dict, session_id: str = "") -> str:
 
         elif tool_name == "get_order_history":
             limit = min(int(tool_input.get("limit", 5)), 10)
-            orders = get_recent_orders(session_id, limit=limit) if session_id else []
+            orders = get_recent_orders(user_id, limit=limit) if user_id else []
             if not orders:
                 result = {"orders": [], "message": "No previous orders found for this user."}
             else:
@@ -617,6 +627,12 @@ def _spend_server_for_tool(tool_name: str) -> str:
         if tool_name in tool_names:
             return server_name
     return ""
+
+
+def _agent_result(response_text, messages, order_placed=False, return_meta=False):
+    if return_meta:
+        return response_text, messages, {"order_placed": order_placed}
+    return response_text, messages
 
 
 def _model_for(surface):
@@ -799,10 +815,10 @@ def _live_order_summary(tool_name: str, tool_input: dict) -> tuple[str, str, lis
     return order_type, summary, items, restaurant_name, total_amount
 
 
-def _save_live_order_if_any(content_blocks: list, session_id: str) -> None:
-    if not session_id:
-        return
-
+def _save_live_order_if_any(
+    content_blocks: list, session_id: str, user_id: str = ""
+) -> bool:
+    user_id = user_id or session_id
     pending_spend_tools = {}
     last_pending_spend_tool = None
     for block in content_blocks:
@@ -826,17 +842,19 @@ def _save_live_order_if_any(content_blocks: list, session_id: str) -> None:
                     _block_value(tool_use, "name", ""),
                     _block_value(tool_use, "input", {}),
                 )
-                save_order(
-                    session_id=session_id,
-                    order_type=order_type,
-                    summary=summary,
-                    items=items,
-                    restaurant_name=restaurant_name,
-                    total_amount=total_amount,
-                )
+                if user_id:
+                    save_order(
+                        session_id=user_id,
+                        order_type=order_type,
+                        summary=summary,
+                        items=items,
+                        restaurant_name=restaurant_name,
+                        total_amount=total_amount,
+                    )
             except Exception:
                 logging.exception("Failed to save live Swiggy order history")
-            return
+            return True
+    return False
 
 
 # ─────────────────────────────────────────────
@@ -847,7 +865,9 @@ def _run_agent_demo(
     user_message: str,
     conversation_history: list[dict],
     surface: str = "voice",
-    session_id: str = ""
+    session_id: str = "",
+    return_meta: bool = False,
+    user_id: str = "",
 ) -> tuple[str, list[dict]]:
     system_prompt = VOICE_SYSTEM_PROMPT if surface == "voice" else CHAT_SYSTEM_PROMPT
     messages = conversation_history + [{"role": "user", "content": user_message}]
@@ -864,25 +884,29 @@ def _run_agent_demo(
         )
         if response.stop_reason == "refusal":
             messages.append({"role": "assistant", "content": REFUSAL_MESSAGE})
-            return REFUSAL_MESSAGE, messages
+            return _agent_result(REFUSAL_MESSAGE, messages, return_meta=return_meta)
         text_blocks = [b.text for b in response.content if hasattr(b, "text")]
         tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason == "end_turn" or not tool_use_blocks:
-            return " ".join(text_blocks).strip(), messages
+            return _agent_result(" ".join(text_blocks).strip(), messages, return_meta=return_meta)
 
         tool_results = [
             {
                 "type": "tool_result",
                 "tool_use_id": tu.id,
-                "content": execute_tool(tu.name, tu.input, session_id=session_id),
+                "content": execute_tool(
+                    tu.name, tu.input, session_id=session_id, user_id=user_id
+                ),
             }
             for tu in tool_use_blocks
         ]
         messages.append({"role": "user", "content": tool_results})
 
-    return "Sorry, something went wrong. Please try again.", messages
+    return _agent_result(
+        "Sorry, something went wrong. Please try again.", messages, return_meta=return_meta
+    )
 
 
 def _run_agent_live(
@@ -891,8 +915,12 @@ def _run_agent_live(
     surface: str,
     session_id: str,
     tokens: dict[str, str],
+    return_meta: bool = False,
+    user_id: str = "",
 ) -> tuple[str, list[dict]]:
     messages = conversation_history + [{"role": "user", "content": user_message}]
+    order_placed = False
+    user_id = user_id or session_id
 
     try:
         system_prompt = (
@@ -987,7 +1015,9 @@ def _run_agent_live(
                 {
                     "type": "tool_result",
                     "tool_use_id": b.id,
-                    "content": execute_tool(b.name, b.input, session_id=session_id),
+                    "content": execute_tool(
+                        b.name, b.input, session_id=session_id, user_id=user_id
+                    ),
                 }
                 for b in local_tool_uses
             ]
@@ -1001,13 +1031,13 @@ def _run_agent_live(
             if isinstance(content, str):
                 continue
             assistant_blocks.extend(content or [])
-        _save_live_order_if_any(assistant_blocks, session_id)
+        order_placed = _save_live_order_if_any(assistant_blocks, session_id, user_id)
 
         # Whole-chain refusal (Fable declined and fallback declined too, or no
         # fallback configured) — content is empty or partial, don't read it.
         if response is not None and response.stop_reason == "refusal":
             messages.append({"role": "assistant", "content": REFUSAL_MESSAGE})
-            return REFUSAL_MESSAGE, messages
+            return _agent_result(REFUSAL_MESSAGE, messages, order_placed, return_meta)
 
         final_text = ""
         for message in reversed(messages):
@@ -1015,20 +1045,31 @@ def _run_agent_live(
                 final_text = _content_text(message.get("content"))
                 break
 
-        return final_text or "Done. Please check Swiggy for the latest status.", messages
+        return _agent_result(
+            final_text or "Done. Please check Swiggy for the latest status.",
+            messages,
+            order_placed,
+            return_meta,
+        )
 
     except Exception:
         logging.exception("Swiggy live agent failed")
         if _is_confirmation(user_message):
-            return LIVE_CHECKOUT_UNCERTAIN_MESSAGE, messages
-        return LIVE_GENERIC_FAILURE_MESSAGE, messages
+            return _agent_result(
+                LIVE_CHECKOUT_UNCERTAIN_MESSAGE, messages, order_placed, return_meta
+            )
+        return _agent_result(
+            LIVE_GENERIC_FAILURE_MESSAGE, messages, order_placed, return_meta
+        )
 
 
 def run_agent(
     user_message: str,
     conversation_history: list[dict],
     surface: str = "voice",  # "voice" or "chat"
-    session_id: str = ""
+    session_id: str = "",
+    return_meta: bool = False,
+    user_id: str = "",
 ) -> tuple[str, list[dict]]:
     """
     Run one turn of the agent.
@@ -1042,32 +1083,65 @@ def run_agent(
         (agent_response_text, updated_conversation_history)
     """
     if DEMO_MODE:
-        return _run_agent_demo(user_message, conversation_history, surface, session_id)
+        return _run_agent_demo(
+            user_message,
+            conversation_history,
+            surface,
+            session_id,
+            return_meta,
+            user_id=user_id,
+        )
 
     try:
-        tokens = get_access_tokens(ACTIVE_TOKEN_KEYS)
+        tokens = get_access_tokens(ACTIVE_TOKEN_KEYS, user_id=user_id)
     except Exception as e:
         logging.warning("Swiggy live auth not ready: %s", e)
         messages = conversation_history + [
             {"role": "user", "content": user_message},
             {"role": "assistant", "content": LIVE_AUTH_NOT_READY_MESSAGE},
         ]
-        return LIVE_AUTH_NOT_READY_MESSAGE, messages
+        return _agent_result(LIVE_AUTH_NOT_READY_MESSAGE, messages, return_meta=return_meta)
 
-    return _run_agent_live(user_message, conversation_history, surface, session_id, tokens)
+    return _run_agent_live(
+        user_message,
+        conversation_history,
+        surface,
+        session_id,
+        tokens,
+        return_meta,
+        user_id=user_id,
+    )
 
 
 # ─────────────────────────────────────────────
-# Session management (in-memory, demo-grade)
+# Session management
 # ─────────────────────────────────────────────
 
-# Sessions keyed by session_id (call SID for voice, phone number for WA)
-_sessions: dict[str, list[dict]] = {}
+# Hot write-through cache keyed by session_id (call SID for voice, phone number for WA).
+_SESSION_CACHE_MAX = 1000
+_sessions: OrderedDict[str, list[dict]] = OrderedDict()
+_sessions_lock = Lock()
+
+
+def _cache_session(session_id: str, history: list[dict]) -> None:
+    _sessions.pop(session_id, None)
+    _sessions[session_id] = history
+    while len(_sessions) > _SESSION_CACHE_MAX:
+        _sessions.popitem(last=False)
 
 
 def get_session(session_id: str) -> list[dict]:
-    """Get or create conversation history for a session."""
-    return _sessions.get(session_id, [])
+    """Get conversation history from the cache, then durable storage."""
+    with _sessions_lock:
+        if session_id in _sessions:
+            history = _sessions.pop(session_id)
+            _sessions[session_id] = history
+            return history
+
+    history = store.get_session(session_id)
+    with _sessions_lock:
+        _cache_session(session_id, history)
+    return history
 
 
 def _sanitize_history(history: list[dict]) -> list[dict]:
@@ -1105,24 +1179,41 @@ def update_session(session_id: str, history: list[dict]) -> None:
     Text-only storage avoids dangling MCP tool blocks after truncation and
     keeps replayed history cheap; each turn rebuilds its own tool calls.
     """
-    _sessions[session_id] = _sanitize_history(history)[-20:]
+    sanitized = _sanitize_history(history)[-20:]
+    store.update_session(session_id, sanitized)
+    with _sessions_lock:
+        _cache_session(session_id, sanitized)
 
 
 def clear_session(session_id: str) -> None:
     """Clear session after order placed or call ended."""
-    _sessions.pop(session_id, None)
+    store.clear_session(session_id)
+    with _sessions_lock:
+        _sessions.pop(session_id, None)
 
 
 def process_message(
     session_id: str,
     user_message: str,
-    surface: str = "voice"
-) -> str:
+    surface: str = "voice",
+    *,
+    return_meta: bool = False,
+    user_id: str = "",
+):
     """
     High-level entry point.
     Takes a session ID + user message, returns agent response string.
     """
     history = get_session(session_id)
-    response_text, updated_history = run_agent(user_message, history, surface, session_id=session_id)
+    user_id = user_id or session_id
+    result = run_agent(
+        user_message,
+        history,
+        surface,
+        session_id=session_id,
+        return_meta=return_meta,
+        user_id=user_id,
+    )
+    response_text, updated_history = result[:2]
     update_session(session_id, updated_history)
-    return response_text
+    return (response_text, result[2]) if return_meta else response_text

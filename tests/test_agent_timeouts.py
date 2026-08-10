@@ -17,6 +17,98 @@ def _fresh_agent():
 
 
 class AgentTimeoutTests(unittest.TestCase):
+    def test_live_spend_result_reports_order_metadata_without_prose_completion(self):
+        agent = _fresh_agent()
+
+        class FakeResponse:
+            content = [
+                {
+                    "type": "mcp_tool_use",
+                    "name": "checkout",
+                    "id": "checkout-1",
+                    "input": {"items": [{"name": "Milk"}]},
+                },
+                {
+                    "type": "mcp_tool_result",
+                    "tool_use_id": "checkout-1",
+                    "is_error": False,
+                },
+                {"type": "text", "text": "Your groceries are on the way."},
+            ]
+            stop_reason = "end_turn"
+
+        with (
+            patch.object(agent.client.beta.messages, "create", return_value=FakeResponse()),
+            patch.object(agent.swiggy_address, "maybe_background_refresh"),
+            patch.object(agent.swiggy_address, "get_cached_default", return_value=None),
+            patch.object(agent, "save_order"),
+        ):
+            _, _, meta = agent._run_agent_live(
+                "yes", [], "voice", "call-test", {"im": "im-token"}, return_meta=True
+            )
+
+        self.assertEqual(meta, {"order_placed": True})
+
+    def test_live_spend_error_does_not_report_order_metadata(self):
+        agent = _fresh_agent()
+
+        class FakeResponse:
+            content = [
+                {
+                    "type": "mcp_tool_use",
+                    "name": "checkout",
+                    "id": "checkout-1",
+                    "input": {"items": [{"name": "Milk"}]},
+                },
+                {
+                    "type": "mcp_tool_result",
+                    "tool_use_id": "checkout-1",
+                    "is_error": True,
+                },
+                {"type": "text", "text": "I couldn't complete that request."},
+            ]
+            stop_reason = "end_turn"
+
+        with (
+            patch.object(agent.client.beta.messages, "create", return_value=FakeResponse()),
+            patch.object(agent.swiggy_address, "maybe_background_refresh"),
+            patch.object(agent.swiggy_address, "get_cached_default", return_value=None),
+            patch.object(agent, "save_order"),
+        ):
+            _, _, meta = agent._run_agent_live(
+                "yes", [], "voice", "call-test", {"im": "im-token"}, return_meta=True
+            )
+
+        self.assertEqual(meta, {"order_placed": False})
+
+    def test_process_message_default_returns_bare_string(self):
+        agent = _fresh_agent()
+
+        with (
+            patch.object(agent, "get_session", return_value=[]),
+            patch.object(agent, "run_agent", return_value=("hello", [])),
+            patch.object(agent, "update_session"),
+        ):
+            result = agent.process_message("call-test", "hi")
+
+        self.assertEqual(result, "hello")
+
+    def test_process_message_can_return_order_metadata(self):
+        agent = _fresh_agent()
+
+        with (
+            patch.object(agent, "get_session", return_value=[]),
+            patch.object(
+                agent,
+                "run_agent",
+                return_value=("accepted", [], {"order_placed": True}),
+            ),
+            patch.object(agent, "update_session"),
+        ):
+            result = agent.process_message("call-test", "yes", return_meta=True)
+
+        self.assertEqual(result, ("accepted", {"order_placed": True}))
+
     def test_live_mode_uses_only_active_instamart_token(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             token_store = os.path.join(tmpdir, ".swiggy_tokens.json")
@@ -47,6 +139,16 @@ class AgentTimeoutTests(unittest.TestCase):
         demo.assert_not_called()
         live.assert_called_once()
         self.assertEqual(live.call_args.args[4], {"im": "im-token"})
+
+    def test_run_agent_passes_user_id_to_token_resolution(self):
+        agent = _fresh_agent()
+        with (
+            patch.object(agent, "get_access_tokens", return_value={"im": "im-token"}) as get_tokens,
+            patch.object(agent, "_run_agent_live", return_value=("live", [])),
+        ):
+            agent.run_agent("milk", [], session_id="call-test", user_id="user-test")
+
+        get_tokens.assert_called_once_with(agent.ACTIVE_TOKEN_KEYS, user_id="user-test")
 
     def test_live_mode_fails_closed_when_active_instamart_token_is_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:

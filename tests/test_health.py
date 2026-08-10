@@ -34,6 +34,14 @@ def _fresh_main():
 
 
 class HealthTests(unittest.TestCase):
+    def test_health_demo_mode_matches_agent_default(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True):
+            main = _fresh_main()
+            result = main.health()
+
+        self.assertEqual(result["demo_mode"], str(main.DEMO_MODE).lower())
+        self.assertEqual(result["demo_mode"], "false")
+
     def test_health_requires_only_active_instamart_token_for_readiness(self):
         env = {
             "DEMO_MODE": "false",

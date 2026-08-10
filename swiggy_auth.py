@@ -27,6 +27,8 @@ from typing import Any
 
 import requests
 
+import store
+
 
 authorization_endpoint = "https://mcp.swiggy.com/auth/authorize"
 token_endpoint = "https://mcp.swiggy.com/auth/token"
@@ -135,8 +137,8 @@ def _record_from_payload(payload: dict[str, Any], now: float) -> dict[str, Any]:
     expires_in = payload.get("expires_in", 3600)
     try:
         expires_in_s = float(expires_in)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(f"Token endpoint returned invalid expires_in: {expires_in!r}") from exc
+    except (TypeError, ValueError):
+        raise RuntimeError("Token endpoint returned invalid expires_in") from None
 
     return {
         "access_token": access_token,
@@ -151,16 +153,19 @@ def exchange_code(
 ) -> dict[str, Any]:
     _validate_key(key)
     now = time.time()
-    payload = _post_token(
-        {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": redirect_uri,
-            "client_id": client_id,
-            "code_verifier": code_verifier,
-        }
-    )
-    record = _record_from_payload(payload, now)
+    try:
+        payload = _post_token(
+            {
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "client_id": client_id,
+                "code_verifier": code_verifier,
+            }
+        )
+        record = _record_from_payload(payload, now)
+    except Exception:
+        raise RuntimeError(f"Swiggy {key} authorization-code exchange failed") from None
     print(
         f"[swiggy_auth] {key}: got access_token (len={len(record['access_token'])}), "
         f"refresh_token={'yes' if record['refresh_token'] else 'no'}, "
@@ -247,16 +252,28 @@ def login(key: str, port: int = 0) -> dict[str, Any]:
     return exchange_code(key, callback_state.code, verifier, redirect_uri)
 
 
-def get_access_token(key: str) -> str:
+def get_access_token(key: str, user_id: str | None = None) -> str:
     _validate_key(key)
-    env_token = os.environ.get(ENV_TOKEN_VARS[key])
-    if env_token:
-        return env_token
 
-    store = _load_store()
-    record = store.get(key)
+    user_record = None
+    if user_id:
+        try:
+            user_record = store.get_user_token(user_id, key)
+        except Exception:
+            pass
+    record = user_record
+
     if not record:
-        raise RuntimeError(f"No token for {key}; run: python3 swiggy_auth.py login {key}")
+        env_token = os.environ.get(ENV_TOKEN_VARS[key])
+        if env_token:
+            return env_token
+
+        file_store = _load_store()
+        record = file_store.get(key)
+        if not record:
+            raise RuntimeError(f"No token for {key}; run: python3 swiggy_auth.py login {key}")
+    else:
+        file_store = None
 
     now = time.time()
     expires_at = float(record.get("expires_at", 0))
@@ -271,13 +288,16 @@ def get_access_token(key: str) -> str:
             f"Re-run: python3 swiggy_auth.py login {key}"
         )
 
-    payload = _post_token(
-        {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": client_id,
-        }
-    )
+    try:
+        payload = _post_token(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+            }
+        )
+    except Exception:
+        raise RuntimeError(f"Swiggy {key} token refresh failed") from None
     refreshed_at = time.time()
     new_access_token = payload.get("access_token")
     if not isinstance(new_access_token, str) or not new_access_token:
@@ -286,27 +306,39 @@ def get_access_token(key: str) -> str:
     expires_in = payload.get("expires_in", 3600)
     try:
         expires_in_s = float(expires_in)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(f"Token endpoint returned invalid expires_in: {expires_in!r}") from exc
+    except (TypeError, ValueError):
+        raise RuntimeError("Token endpoint returned invalid expires_in") from None
 
     new_refresh_token = payload.get("refresh_token")
     if not isinstance(new_refresh_token, str) or not new_refresh_token:
         new_refresh_token = refresh_token
 
-    store[key] = {
+    refreshed_record = {
         "access_token": new_access_token,
         "refresh_token": new_refresh_token,
         "expires_at": refreshed_at + expires_in_s - 60,
         "obtained_at": refreshed_at,
     }
-    _save_store(store)
+    if user_record:
+        try:
+            store.save_user_token(user_id, key, refreshed_record)
+        except Exception:
+            pass
+    else:
+        file_store[key] = refreshed_record
+        _save_store(file_store)
     return new_access_token
 
 
-def get_access_tokens(keys: tuple[str, ...] | list[str] | None = None) -> dict[str, str]:
+def get_access_tokens(
+    keys: tuple[str, ...] | list[str] | None = None, user_id: str | None = None
+) -> dict[str, str]:
     selected_keys = tuple(keys) if keys is not None else tuple(RESOURCES)
     for key in selected_keys:
         _validate_key(key)
+
+    if user_id:
+        return {key: get_access_token(key, user_id=user_id) for key in selected_keys}
 
     store = _load_store()
     missing = [
