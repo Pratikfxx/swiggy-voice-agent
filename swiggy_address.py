@@ -6,12 +6,9 @@ import threading
 import time
 
 from mcp import ClientSession
-try:
-    from mcp.client.streamable_http import streamablehttp_client
-except ImportError:
-    from mcp.client.streamable_http import streamable_http_client as streamablehttp_client
 
 from swiggy_auth import get_access_token
+from swiggy_mcp import open_authenticated_mcp
 from swiggy_scope import ACTIVE_SWIGGY_SERVERS, SERVER_AUTH_KEYS, SWIGGY_SERVER_URLS
 
 
@@ -68,10 +65,7 @@ def _parse_addresses_result(result) -> dict | None:
 async def fetch_default_address() -> dict | None:
     try:
         token = get_access_token(ADDRESS_TOKEN_KEY)
-        async with streamablehttp_client(
-            ADDRESS_URL,
-            headers={"Authorization": f"Bearer {token}"},
-        ) as (read, write, _):
+        async with open_authenticated_mcp(ADDRESS_URL, token) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.call_tool("get_addresses", {})

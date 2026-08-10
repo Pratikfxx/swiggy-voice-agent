@@ -11,13 +11,10 @@ import asyncio
 import json
 import logging
 
-try:
-    from mcp.client.streamable_http import streamablehttp_client
-except ImportError:
-    from mcp.client.streamable_http import streamable_http_client as streamablehttp_client
 from mcp import ClientSession
 
 from swiggy_auth import get_access_token
+from swiggy_mcp import open_authenticated_mcp
 from swiggy_scope import ACTIVE_SWIGGY_SERVERS, SERVER_AUTH_KEYS, SWIGGY_SERVER_URLS
 
 _IM_SERVER = ACTIVE_SWIGGY_SERVERS[0]
@@ -83,9 +80,7 @@ async def _batch(queries: list[str], address_id: str) -> list[dict]:
     concurrently without N connections.
     """
     token = get_access_token(_IM_TOKEN_KEY)
-    async with streamablehttp_client(
-        _IM_URL, headers={"Authorization": f"Bearer {token}"}
-    ) as (read, write, _):
+    async with open_authenticated_mcp(_IM_URL, token) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             tasks = [_search_one(session, q, address_id) for q in queries]
@@ -104,9 +99,7 @@ async def _search_and_cart(
     queries: list[str], address_id: str, quantity: int
 ) -> tuple[list[dict], bool, str]:
     token = get_access_token(_IM_TOKEN_KEY)
-    async with streamablehttp_client(
-        _IM_URL, headers={"Authorization": f"Bearer {token}"}
-    ) as (read, write, _):
+    async with open_authenticated_mcp(_IM_URL, token) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             found = await asyncio.gather(
