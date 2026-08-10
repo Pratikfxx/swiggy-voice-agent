@@ -5,6 +5,12 @@ Render free instances do not keep local disk, so production uses Postgres when
 DATABASE_URL is present. Local development and tests use SQLite. Callers should
 not know which SQL dialect is active, and webhook flows should never fail just
 because storage is temporarily unavailable.
+
+Set TOKEN_ENCRYPTION_KEY to a urlsafe-base64 32-byte Fernet key to encrypt
+Swiggy access and refresh tokens at rest. Generate one with
+`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+Rotating the key requires re-linking accounts because old ciphertext becomes
+unreadable.
 """
 
 from __future__ import annotations
@@ -18,6 +24,8 @@ from contextlib import closing, nullcontext
 from datetime import datetime, timedelta
 from typing import Any
 
+from cryptography.fernet import Fernet, InvalidToken
+
 
 SQLITE_DEFAULT_PATH = "/tmp/swiggy.db"
 SESSION_TTL_SECS = 21600
@@ -25,6 +33,34 @@ SESSION_TTL_SECS = 21600
 # ponytail: one lock for every SQLite database this process touches; split into
 # per-path locks if a second database ever shares it or write throughput matters.
 _WRITE_LOCK = threading.Lock()
+
+
+def _load_token_cipher() -> Fernet | None:
+    key = os.environ.get("TOKEN_ENCRYPTION_KEY")
+    if key is None:
+        return None
+    try:
+        return Fernet(key.encode("ascii"))
+    except (TypeError, UnicodeError, ValueError):
+        raise ValueError("Invalid TOKEN_ENCRYPTION_KEY") from None
+
+
+_TOKEN_CIPHER = _load_token_cipher()
+
+
+def _encrypt_token(value: str) -> str:
+    if _TOKEN_CIPHER is None:
+        return value
+    return _TOKEN_CIPHER.encrypt(value.encode("utf-8")).decode("ascii")
+
+
+def _decrypt_token(value: str) -> str:
+    if _TOKEN_CIPHER is None:
+        return value
+    try:
+        return _TOKEN_CIPHER.decrypt(value.encode("ascii")).decode("utf-8")
+    except (InvalidToken, UnicodeError, ValueError, TypeError):
+        return value
 
 
 def _database_url() -> str:
@@ -301,8 +337,8 @@ def save_user_token(user_id: str, server_key: str, record: dict[str, Any]) -> No
                     (
                         user_id,
                         server_key,
-                        access_token,
-                        refresh_token,
+                        _encrypt_token(access_token),
+                        _encrypt_token(refresh_token),
                         expires_at,
                         _now_iso(),
                     ),
@@ -327,7 +363,12 @@ def get_user_token(user_id: str, server_key: str) -> dict[str, Any] | None:
     except Exception:
         _log_storage_warning("get_user_token", include_error=False)
         return None
-    return _row_to_dict(row) if row else None
+    if not row:
+        return None
+    result = _row_to_dict(row)
+    result["access_token"] = _decrypt_token(result["access_token"])
+    result["refresh_token"] = _decrypt_token(result["refresh_token"])
+    return result
 
 
 def clear_user_tokens(user_id: str) -> None:

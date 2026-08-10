@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import importlib
+import logging
 import os
 import sys
 from threading import Event, Thread
@@ -7,10 +8,17 @@ import types
 from unittest.mock import MagicMock, Mock
 import warnings
 
+import pytest
+from cryptography.fernet import Fernet
 
-def _fresh_store(monkeypatch, tmp_path):
+
+def _fresh_store(monkeypatch, tmp_path, token_encryption_key=None):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("ORDER_HISTORY_DB", str(tmp_path / "swiggy.db"))
+    if token_encryption_key is None:
+        monkeypatch.delenv("TOKEN_ENCRYPTION_KEY", raising=False)
+    else:
+        monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", token_encryption_key)
     sys.modules.pop("store", None)
     return importlib.import_module("store")
 
@@ -124,6 +132,99 @@ def test_user_tokens_upsert_round_trip_and_clear(monkeypatch, tmp_path):
     store.clear_user_tokens("user-1")
     assert store.get_user_token("user-1", "im") is None
     assert store.get_user_token("user-2", "im") == first
+
+
+def test_user_tokens_without_key_remain_plaintext(monkeypatch, tmp_path):
+    store = _fresh_store(monkeypatch, tmp_path)
+    record = {
+        "access_token": "plain-access",
+        "refresh_token": "plain-refresh",
+        "expires_at": 1000,
+    }
+
+    store.save_user_token("user-1", "im", record)
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT access_token, refresh_token FROM user_tokens WHERE user_id = ? AND server_key = ?",
+            ("user-1", "im"),
+        ).fetchone()
+    assert tuple(row) == (record["access_token"], record["refresh_token"])
+    assert store.get_user_token("user-1", "im") == record
+
+
+def test_user_tokens_are_encrypted_at_rest_with_key(monkeypatch, tmp_path):
+    store = _fresh_store(monkeypatch, tmp_path, Fernet.generate_key().decode())
+    record = {
+        "access_token": "secret-access",
+        "refresh_token": "secret-refresh",
+        "expires_at": 1000,
+    }
+
+    store.save_user_token("user-1", "im", record)
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT access_token, refresh_token FROM user_tokens WHERE user_id = ? AND server_key = ?",
+            ("user-1", "im"),
+        ).fetchone()
+    assert row["access_token"] != record["access_token"]
+    assert row["refresh_token"] != record["refresh_token"]
+    assert record["access_token"] not in row["access_token"]
+    assert record["refresh_token"] not in row["refresh_token"]
+    assert store.get_user_token("user-1", "im") == record
+
+
+def test_plaintext_user_tokens_remain_readable_after_key_is_enabled(monkeypatch, tmp_path):
+    record = {
+        "access_token": "legacy-access",
+        "refresh_token": "legacy-refresh",
+        "expires_at": 1000,
+    }
+    plain_store = _fresh_store(monkeypatch, tmp_path)
+    plain_store.save_user_token("user-1", "im", record)
+
+    encrypted_store = _fresh_store(monkeypatch, tmp_path, Fernet.generate_key().decode())
+
+    assert encrypted_store.get_user_token("user-1", "im") == record
+
+
+def test_invalid_token_encryption_key_raises_at_import(monkeypatch, tmp_path):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("ORDER_HISTORY_DB", str(tmp_path / "swiggy.db"))
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", "not-a-fernet-key")
+    sys.modules.pop("store", None)
+
+    with pytest.raises(ValueError, match="TOKEN_ENCRYPTION_KEY"):
+        importlib.import_module("store")
+
+
+def test_token_storage_logs_never_include_secrets(monkeypatch, tmp_path, caplog):
+    key = Fernet.generate_key().decode()
+    store = _fresh_store(monkeypatch, tmp_path, key)
+    record = {
+        "access_token": "logged-access-must-not-appear",
+        "refresh_token": "logged-refresh-must-not-appear",
+        "expires_at": 1000,
+    }
+    store.save_user_token("user-1", "im", record)
+    with store._connect() as conn:
+        ciphertext = conn.execute(
+            "SELECT access_token FROM user_tokens WHERE user_id = ? AND server_key = ?",
+            ("user-1", "im"),
+        ).fetchone()[0]
+
+    def fail_connect():
+        raise OSError(f"{key} {record['access_token']} {ciphertext}")
+
+    monkeypatch.setattr(store, "_connect", fail_connect)
+    with caplog.at_level(logging.WARNING):
+        assert store.get_user_token("user-1", "im") is None
+        store.save_user_token("user-1", "im", record)
+        store.clear_user_tokens("user-1")
+
+    for secret in (key, record["access_token"], record["refresh_token"], ciphertext):
+        assert secret not in caplog.text
 
 
 def test_user_token_storage_failure_is_failure_tolerant(monkeypatch, tmp_path):
