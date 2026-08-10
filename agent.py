@@ -13,11 +13,14 @@ import json
 import os
 import re
 import logging
+from collections import OrderedDict
+from threading import Lock
 
 import anthropic
 
 from recipe_engine import get_recipe_ingredients as _get_recipe_ingredients
 from order_history import save_order, get_recent_orders
+import store
 import swiggy_address
 from swiggy_search import search_and_add_to_cart
 from swiggy_auth import get_access_tokens
@@ -1058,16 +1061,34 @@ def run_agent(
 
 
 # ─────────────────────────────────────────────
-# Session management (in-memory, demo-grade)
+# Session management
 # ─────────────────────────────────────────────
 
-# Sessions keyed by session_id (call SID for voice, phone number for WA)
-_sessions: dict[str, list[dict]] = {}
+# Hot write-through cache keyed by session_id (call SID for voice, phone number for WA).
+_SESSION_CACHE_MAX = 1000
+_sessions: OrderedDict[str, list[dict]] = OrderedDict()
+_sessions_lock = Lock()
+
+
+def _cache_session(session_id: str, history: list[dict]) -> None:
+    _sessions.pop(session_id, None)
+    _sessions[session_id] = history
+    while len(_sessions) > _SESSION_CACHE_MAX:
+        _sessions.popitem(last=False)
 
 
 def get_session(session_id: str) -> list[dict]:
-    """Get or create conversation history for a session."""
-    return _sessions.get(session_id, [])
+    """Get conversation history from the cache, then durable storage."""
+    with _sessions_lock:
+        if session_id in _sessions:
+            history = _sessions.pop(session_id)
+            _sessions[session_id] = history
+            return history
+
+    history = store.get_session(session_id)
+    with _sessions_lock:
+        _cache_session(session_id, history)
+    return history
 
 
 def _sanitize_history(history: list[dict]) -> list[dict]:
@@ -1105,12 +1126,17 @@ def update_session(session_id: str, history: list[dict]) -> None:
     Text-only storage avoids dangling MCP tool blocks after truncation and
     keeps replayed history cheap; each turn rebuilds its own tool calls.
     """
-    _sessions[session_id] = _sanitize_history(history)[-20:]
+    sanitized = _sanitize_history(history)[-20:]
+    store.update_session(session_id, sanitized)
+    with _sessions_lock:
+        _cache_session(session_id, sanitized)
 
 
 def clear_session(session_id: str) -> None:
     """Clear session after order placed or call ended."""
-    _sessions.pop(session_id, None)
+    store.clear_session(session_id)
+    with _sessions_lock:
+        _sessions.pop(session_id, None)
 
 
 def process_message(

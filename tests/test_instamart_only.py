@@ -1,4 +1,5 @@
 import importlib
+import os
 import sys
 import unittest
 import warnings
@@ -13,6 +14,7 @@ def _fresh_agent():
 
 
 def _fresh_voice_handler():
+    os.environ["TWILIO_VALIDATE_WEBHOOKS"] = "false"
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=ResourceWarning)
         for name in ("voice_handler", "agent"):

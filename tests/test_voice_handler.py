@@ -1,5 +1,6 @@
 import importlib
 import asyncio
+import os
 import sys
 import time
 import unittest
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 
 def _fresh_voice_handler():
+    os.environ["TWILIO_VALIDATE_WEBHOOKS"] = "false"
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=ResourceWarning)
         for name in ("voice_handler", "agent"):
@@ -176,7 +178,7 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(voice_handler.VOICE_RESULT_MAX_POLLS, 8)
         self.assertGreaterEqual(voice_handler.VOICE_AGENT_TIMEOUT_SECS, 15)
 
-    async def test_voice_process_acknowledges_multi_item_requests_without_agent_gap(self):
+    async def test_voice_process_starts_background_job_for_multi_item_requests(self):
         voice_handler = _fresh_voice_handler()
 
         class FakeRequest:
@@ -188,21 +190,19 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
                 }
 
         with (
-            patch.object(voice_handler, "process_message") as process_message,
+            patch.object(voice_handler, "process_message", return_value="I found milk and bread. Add these?"),
             patch.object(voice_handler, "generate_tts_audio", return_value=None),
         ):
             start = time.monotonic()
             response = await voice_handler.voice_process(FakeRequest())
             elapsed = time.monotonic() - start
+            await asyncio.sleep(0.05)
 
         twiml = response.body.decode()
-        process_message.assert_not_called()
         self.assertLess(elapsed, 0.05)
-        self.assertIn("one item at a time", twiml)
-        self.assertIn("milk", twiml)
-        self.assertIn("bread", twiml)
-        self.assertIn("<Gather", twiml)
-        self.assertNotIn("<Hangup", twiml)
+        self.assertIn("Checking Instamart", twiml)
+        self.assertIn("/voice/result", twiml)
+        self.assertIn("multi-item-call", voice_handler._voice_agent_results)
 
     async def test_voice_process_consumes_fast_pending_item_on_confirmation(self):
         voice_handler = _fresh_voice_handler()
