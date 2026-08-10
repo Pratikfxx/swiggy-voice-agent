@@ -102,6 +102,44 @@ def test_orders_round_trip_with_recent_limit_and_desc_order(monkeypatch, tmp_pat
     assert store.get_last_order("wa-1")["summary"] == "third"
 
 
+def test_user_tokens_upsert_round_trip_and_clear(monkeypatch, tmp_path):
+    store = _fresh_store(monkeypatch, tmp_path)
+    first = {
+        "access_token": "access-1",
+        "refresh_token": "refresh-1",
+        "expires_at": 1000,
+    }
+    second = {
+        "access_token": "access-2",
+        "refresh_token": "refresh-2",
+        "expires_at": 2000,
+    }
+
+    store.save_user_token("user-1", "im", first)
+    store.save_user_token("user-1", "im", second)
+    store.save_user_token("user-2", "im", first)
+
+    assert store.get_user_token("user-1", "im") == second
+    assert store.get_user_token("user-2", "im") == first
+    store.clear_user_tokens("user-1")
+    assert store.get_user_token("user-1", "im") is None
+    assert store.get_user_token("user-2", "im") == first
+
+
+def test_user_token_storage_failure_is_failure_tolerant(monkeypatch, tmp_path):
+    store = _fresh_store(monkeypatch, tmp_path)
+
+    def fail_connect():
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(store, "_connect", fail_connect)
+    record = {"access_token": "access", "refresh_token": "refresh", "expires_at": 1000}
+
+    assert store.get_user_token("user-1", "im") is None
+    store.save_user_token("user-1", "im", record)
+    store.clear_user_tokens("user-1")
+
+
 def test_expired_sessions_are_pruned_on_write(monkeypatch, tmp_path):
     store = _fresh_store(monkeypatch, tmp_path)
     monkeypatch.setenv("SESSION_TTL_SECS", "1")
@@ -200,13 +238,22 @@ def test_postgres_dialect_is_generated_by_real_store_paths(monkeypatch):
     store.get_session("call-1")
     store.update_session("call-1", [{"role": "user", "content": "milk"}])
     store.clear_session("call-1")
+    store.save_user_token(
+        "user-1",
+        "im",
+        {"access_token": "access", "refresh_token": "refresh", "expires_at": 1000},
+    )
+    store.get_user_token("user-1", "im")
+    store.clear_user_tokens("user-1")
 
     statements = [" ".join(call.args[0].split()) for call in connection.execute.call_args_list]
     orders_ddl = next(sql for sql in statements if sql.startswith("CREATE TABLE IF NOT EXISTS orders"))
     sessions_ddl = next(sql for sql in statements if sql.startswith("CREATE TABLE IF NOT EXISTS sessions"))
+    user_tokens_ddl = next(sql for sql in statements if sql.startswith("CREATE TABLE IF NOT EXISTS user_tokens"))
     save_sql = next(sql for sql in statements if sql.startswith("INSERT INTO orders"))
     recent_sql = next(sql for sql in statements if sql.startswith("SELECT * FROM orders") and "LIMIT %s" in sql)
     upsert_sql = next(sql for sql in statements if sql.startswith("INSERT INTO sessions"))
+    token_upsert_sql = next(sql for sql in statements if sql.startswith("INSERT INTO user_tokens"))
 
     assert psycopg.connect.call_args.args[0] == "postgresql://test.invalid/swiggy"
     assert psycopg.connect.call_args.kwargs["row_factory"] is rows.dict_row
@@ -219,6 +266,9 @@ def test_postgres_dialect_is_generated_by_real_store_paths(monkeypatch):
     assert "ON CONFLICT(session_id) DO UPDATE SET" in upsert_sql
     assert "history_json = excluded.history_json," in upsert_sql
     assert "updated_at = excluded.updated_at" in upsert_sql
+    assert "PRIMARY KEY (user_id, server_key)" in user_tokens_ddl
+    assert "VALUES (%s, %s, %s, %s, %s, %s)" in token_upsert_sql
+    assert "ON CONFLICT(user_id, server_key) DO UPDATE SET" in token_upsert_sql
     assert all("?" not in sql for sql in statements)
 
 

@@ -1093,7 +1093,7 @@ def run_agent(
         )
 
     try:
-        tokens = get_access_tokens(ACTIVE_TOKEN_KEYS)
+        tokens = get_access_tokens(ACTIVE_TOKEN_KEYS, user_id=user_id)
     except Exception as e:
         logging.warning("Swiggy live auth not ready: %s", e)
         messages = conversation_history + [

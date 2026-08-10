@@ -69,8 +69,13 @@ def _row_to_dict(row: Any) -> dict:
     return dict(row)
 
 
-def _log_storage_warning(action: str, error: Exception) -> None:
-    logging.warning("Storage %s failed; continuing without persistence: %s", action, error)
+def _log_storage_warning(
+    action: str, error: Exception | None = None, *, include_error: bool = True
+) -> None:
+    if include_error and error is not None:
+        logging.warning("Storage %s failed; continuing without persistence: %s", action, error)
+    else:
+        logging.warning("Storage %s failed; continuing without persistence", action)
 
 
 def _init() -> None:
@@ -102,6 +107,19 @@ def _init() -> None:
                         session_id   TEXT PRIMARY KEY,
                         history_json TEXT NOT NULL,
                         updated_at   TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS user_tokens (
+                        user_id      TEXT NOT NULL,
+                        server_key   TEXT NOT NULL,
+                        access_token TEXT NOT NULL,
+                        refresh_token TEXT NOT NULL,
+                        expires_at   REAL NOT NULL,
+                        updated_at   TEXT NOT NULL,
+                        PRIMARY KEY (user_id, server_key)
                     )
                     """
                 )
@@ -253,6 +271,74 @@ def clear_session(session_id: str) -> None:
                 conn.execute(f"DELETE FROM sessions WHERE session_id = {ph}", (session_id,))
     except Exception as error:
         _log_storage_warning("clear_session", error)
+
+
+def save_user_token(user_id: str, server_key: str, record: dict[str, Any]) -> None:
+    """Persist a user's Swiggy token without risking the live conversation."""
+    ph = _placeholder()
+    try:
+        access_token = record.get("access_token")
+        refresh_token = record.get("refresh_token") or ""
+        expires_at = float(record.get("expires_at", 0))
+        if not isinstance(access_token, str) or not access_token:
+            raise ValueError("invalid access token record")
+        if not isinstance(refresh_token, str):
+            refresh_token = ""
+        with _write_guard(), closing(_connect()) as conn:
+            with conn:
+                conn.execute(
+                    f"""
+                    INSERT INTO user_tokens
+                        (user_id, server_key, access_token, refresh_token,
+                         expires_at, updated_at)
+                    VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+                    ON CONFLICT(user_id, server_key) DO UPDATE SET
+                        access_token = excluded.access_token,
+                        refresh_token = excluded.refresh_token,
+                        expires_at = excluded.expires_at,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        user_id,
+                        server_key,
+                        access_token,
+                        refresh_token,
+                        expires_at,
+                        _now_iso(),
+                    ),
+                )
+    except Exception:
+        _log_storage_warning("save_user_token", include_error=False)
+
+
+def get_user_token(user_id: str, server_key: str) -> dict[str, Any] | None:
+    """Return a user's Swiggy token record, or None on miss/failure."""
+    ph = _placeholder()
+    try:
+        with closing(_connect()) as conn:
+            row = conn.execute(
+                f"""
+                SELECT access_token, refresh_token, expires_at
+                FROM user_tokens
+                WHERE user_id = {ph} AND server_key = {ph}
+                """,
+                (user_id, server_key),
+            ).fetchone()
+    except Exception:
+        _log_storage_warning("get_user_token", include_error=False)
+        return None
+    return _row_to_dict(row) if row else None
+
+
+def clear_user_tokens(user_id: str) -> None:
+    """Delete all persisted Swiggy tokens for a user."""
+    ph = _placeholder()
+    try:
+        with _write_guard(), closing(_connect()) as conn:
+            with conn:
+                conn.execute(f"DELETE FROM user_tokens WHERE user_id = {ph}", (user_id,))
+    except Exception:
+        _log_storage_warning("clear_user_tokens", include_error=False)
 
 
 _init()

@@ -140,6 +140,16 @@ class AgentTimeoutTests(unittest.TestCase):
         live.assert_called_once()
         self.assertEqual(live.call_args.args[4], {"im": "im-token"})
 
+    def test_run_agent_passes_user_id_to_token_resolution(self):
+        agent = _fresh_agent()
+        with (
+            patch.object(agent, "get_access_tokens", return_value={"im": "im-token"}) as get_tokens,
+            patch.object(agent, "_run_agent_live", return_value=("live", [])),
+        ):
+            agent.run_agent("milk", [], session_id="call-test", user_id="user-test")
+
+        get_tokens.assert_called_once_with(agent.ACTIVE_TOKEN_KEYS, user_id="user-test")
+
     def test_live_mode_fails_closed_when_active_instamart_token_is_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             token_store = os.path.join(tmpdir, ".swiggy_tokens.json")
