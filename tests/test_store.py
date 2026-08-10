@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import importlib
 import logging
 import os
@@ -144,7 +145,7 @@ def test_user_tokens_without_key_remain_plaintext(monkeypatch, tmp_path):
 
     store.save_user_token("user-1", "im", record)
 
-    with store._connect() as conn:
+    with closing(store._connect()) as conn:
         row = conn.execute(
             "SELECT access_token, refresh_token FROM user_tokens WHERE user_id = ? AND server_key = ?",
             ("user-1", "im"),
@@ -163,7 +164,7 @@ def test_user_tokens_are_encrypted_at_rest_with_key(monkeypatch, tmp_path):
 
     store.save_user_token("user-1", "im", record)
 
-    with store._connect() as conn:
+    with closing(store._connect()) as conn:
         row = conn.execute(
             "SELECT access_token, refresh_token FROM user_tokens WHERE user_id = ? AND server_key = ?",
             ("user-1", "im"),
@@ -208,7 +209,7 @@ def test_token_storage_logs_never_include_secrets(monkeypatch, tmp_path, caplog)
         "expires_at": 1000,
     }
     store.save_user_token("user-1", "im", record)
-    with store._connect() as conn:
+    with closing(store._connect()) as conn:
         ciphertext = conn.execute(
             "SELECT access_token FROM user_tokens WHERE user_id = ? AND server_key = ?",
             ("user-1", "im"),
@@ -246,11 +247,12 @@ def test_expired_sessions_are_pruned_on_write(monkeypatch, tmp_path):
     monkeypatch.setenv("SESSION_TTL_SECS", "1")
 
     store.update_session("old", [{"role": "user", "content": "old"}])
-    with store._connect() as conn:
-        conn.execute(
-            "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
-            ("2000-01-01T00:00:00", "old"),
-        )
+    with closing(store._connect()) as conn:
+        with conn:
+            conn.execute(
+                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                ("2000-01-01T00:00:00", "old"),
+            )
 
     store.update_session("new", [{"role": "user", "content": "new"}])
 
@@ -399,7 +401,7 @@ def test_sqlite_concurrent_writes_are_persisted(monkeypatch, tmp_path):
         list(pool.map(write, range(64)))
 
     assert warnings_seen == []
-    with store._connect() as conn:
+    with closing(store._connect()) as conn:
         assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 64
         assert conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 64
 
