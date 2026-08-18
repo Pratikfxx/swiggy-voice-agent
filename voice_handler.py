@@ -50,10 +50,30 @@ _VOICE_NON_ITEM_RE = re.compile(
 )
 
 
+# Punctuation the model reaches for that is not ASCII. Translate before
+# stripping: deleting an em dash outright glues its neighbours together
+# ("odd\u2014looks" became "oddlooks" on a live call), and deleting a curly
+# apostrophe silently rewrites "It's" as "Its".
+_TTS_PUNCTUATION = {
+    "\u2019": "'", "\u2018": "'",
+    "\u201c": '"', "\u201d": '"',
+    "\u2014": ", ", "\u2013": ", ",
+    "\u2026": ". ",
+    "\u2022": ", ",
+    "\u00a0": " ",
+}
+
+
 def clean_for_voice(text: str) -> str:
     """Strip emojis, markdown, and symbols that TTS reads literally."""
-    # Remove emojis
-    text = re.sub(r'[^\x00-\x7Fऀ-ॿÀ-ɏ]+', '', text)
+    for source, spoken in _TTS_PUNCTUATION.items():
+        text = text.replace(source, spoken)
+    # "\u20b9128" has to become "128 rupees", not "rupees 128".
+    text = re.sub(r"\u20b9\s?(\d[\d,]*)", r"\1 rupees", text)
+    # Anything still non-ASCII (emoji, stray symbols) becomes a space rather
+    # than nothing, so removal can never fuse two words. Devanagari and Latin
+    # accents are kept — the agent answers in Hindi too.
+    text = re.sub(r'[^\x00-\x7Fऀ-ॿÀ-ɏ]+', ' ', text)
     # Remove model narration that sounds robotic on a live call.
     text = re.sub(
         r"^\s*(?:i(?:'ll| will)|let me|lemme)\s+(?:search|look|check)(?:\s+for)?[^.?!]*[.?!]\s*",
@@ -71,6 +91,8 @@ def clean_for_voice(text: str) -> str:
     # Collapse extra whitespace/newlines
     text = re.sub(r'\n+', '. ', text)
     text = re.sub(r'\s{2,}', ' ', text)
+    # Translating punctuation can leave " ," or " ." behind.
+    text = re.sub(r'\s+([,.!?])', r'\1', text)
     return text.strip()
 
 load_dotenv()

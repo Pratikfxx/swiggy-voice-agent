@@ -369,3 +369,37 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CleanForVoiceTests(unittest.TestCase):
+    """TTS text hygiene — a live call said "oddlooks" because an em dash was
+    deleted rather than replaced, fusing the words on either side."""
+
+    def setUp(self):
+        self.voice_handler = _fresh_voice_handler()
+
+    def test_em_dash_never_fuses_neighbouring_words(self):
+        clean = self.voice_handler.clean_for_voice("That's odd—looks like it is gone.")
+        self.assertNotIn("oddlooks", clean)
+        self.assertIn("odd, looks", clean)
+
+    def test_curly_apostrophe_survives_as_ascii(self):
+        clean = self.voice_handler.clean_for_voice("It’s ready. Don’t worry.")
+        self.assertIn("It's ready", clean)
+        self.assertIn("Don't worry", clean)
+
+    def test_rupee_sign_is_spoken_after_the_number(self):
+        self.assertEqual(self.voice_handler.clean_for_voice("Total: ₹128"), "Total: 128 rupees")
+
+    def test_emoji_removal_does_not_fuse_words(self):
+        self.assertEqual(
+            self.voice_handler.clean_for_voice("Done\U0001F389Arriving soon."), "Done Arriving soon."
+        )
+
+    def test_devanagari_is_preserved(self):
+        hindi = "ठीक है"
+        self.assertIn(hindi, self.voice_handler.clean_for_voice(hindi))
+
+    def test_no_space_left_before_punctuation(self):
+        clean = self.voice_handler.clean_for_voice("Amul Taaza — 59 rupees — done.")
+        self.assertNotIn(" ,", clean)
