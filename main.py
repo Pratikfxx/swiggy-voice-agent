@@ -45,7 +45,10 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="Swiggy Voice Agent",
-    description="Order food and groceries via phone call or WhatsApp",
+    description=(
+        "Order Instamart groceries, snacks, drinks, essentials, and recipe ingredients "
+        "via phone call or WhatsApp"
+    ),
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -128,7 +131,7 @@ def demo_page():
     <body>
         <div class="header">
             <h1>🎙️ Swiggy Voice Agent</h1>
-            <p>Order food &amp; groceries via phone call or WhatsApp · Powered by Claude + Swiggy MCP</p>
+            <p>Instamart groceries by phone call or WhatsApp · Powered by Claude + Swiggy MCP</p>
         </div>
 
         <div class="card">
@@ -170,10 +173,10 @@ def demo_page():
         <div class="card">
             <h2>Demo Conversations</h2>
             <div class="demo-box">
-<span class="user">User: "Ek chicken biryani chahiye"</span>
-<span class="bot">Bot:  "Biryani Blues is nearby — 4.5 stars, 30 mins, 299 rupees. Want that?"</span>
+<span class="user">User: "Order milk, chips and Coke"</span>
+<span class="bot">Bot:  "Amul Taaza milk, Lay's classic and a Coke — 128 rupees, 12 minutes. Confirm?"</span>
 <span class="user">User: "Haan"</span>
-<span class="bot">Bot:  "Placed! Arriving in 30 minutes. Order confirmed!"</span>
+<span class="bot">Bot:  "Done! Arriving in 12 minutes."</span>
             </div>
             <br>
             <div class="demo-box">

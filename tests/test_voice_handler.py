@@ -190,10 +190,8 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<Gather", twiml)
         self.assertNotIn("ready-call", voice_handler._voice_agent_results)
 
-    async def test_voice_result_keeps_call_alive_while_background_job_is_pending(self):
+    async def test_voice_result_keeps_call_alive_without_repeating_filler(self):
         voice_handler = _fresh_voice_handler()
-        task = asyncio.create_task(asyncio.sleep(0.2))
-        voice_handler._voice_agent_tasks["pending-result-call"] = task
 
         class FakeRequest:
             query_params = {"callSid": "pending-result-call", "poll": "1"}
@@ -202,11 +200,27 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
                 return {}
 
         response = await voice_handler.voice_result(FakeRequest())
-        task.cancel()
 
         twiml = response.body.decode()
-        self.assertIn("Still checking Instamart", twiml)
+        self.assertNotIn("<Say", twiml)
         self.assertIn("/voice/result", twiml)
+
+    async def test_voice_result_speaks_only_at_configured_wait_polls(self):
+        voice_handler = _fresh_voice_handler()
+
+        class FakeRequest:
+            def __init__(self, poll):
+                self.query_params = {"callSid": "sparse-poll-call", "poll": str(poll)}
+
+            async def form(self):
+                return {}
+
+        for poll, expected in ((4, "Still checking Instamart."), (8, "Almost there.")):
+            response = await voice_handler.voice_result(FakeRequest(poll))
+            twiml = response.body.decode()
+
+            self.assertIn("<Say", twiml)
+            self.assertIn(expected, twiml)
 
     def test_voice_polling_budget_allows_live_search_to_finish_without_dead_air(self):
         voice_handler = _fresh_voice_handler()

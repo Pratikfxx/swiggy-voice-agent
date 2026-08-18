@@ -145,15 +145,11 @@ VOICE_RESULT_MAX_POLLS = int(os.getenv("VOICE_RESULT_MAX_POLLS", "12"))
 # so a normal grocery list no longer risks the voice deadline. Only trip the
 # one-at-a-time guard for long lists; smaller ones go straight to the agent.
 _VOICE_MULTI_ITEM_GUARD = int(os.getenv("VOICE_MULTI_ITEM_GUARD", "6"))
-# Rotated while the agent works. Repeating one line every poll made callers feel
-# stuck ("Still checking Instamart" four times in a row); varying it reads as
-# progress instead of a broken record.
-_VOICE_WAIT_LINES = (
-    "Still checking Instamart.",
-    "Almost there.",
-    "Just a few more seconds.",
-    "Nearly done.",
-)
+# Sparse check-ins keep the caller informed without talking over the wait.
+_VOICE_WAIT_LINES = {
+    4: "Still checking Instamart.",
+    8: "Almost there.",
+}
 SILENCE_REPROMPT = "I didn't catch that. Say the item again, or say cancel."
 VOICE_AGENT_TIMEOUT_MESSAGE = (
     "Swiggy is taking a bit longer. I'm still here. "
@@ -421,7 +417,8 @@ def make_voice_waiting_twiml(
     call_sid: str, message: str, poll: int = 1, base_url: Optional[str] = None
 ) -> str:
     vr = VoiceResponse()
-    vr.say(message, voice=TWILIO_TTS_VOICE, language=TWILIO_TTS_LANGUAGE)
+    if message:
+        vr.say(message, voice=TWILIO_TTS_VOICE, language=TWILIO_TTS_LANGUAGE)
     # Longer hold between polls means fewer filler lines over the same wait.
     vr.pause(length=2)
     base = (base_url or get_base_url()).rstrip("/")
@@ -752,7 +749,7 @@ async def voice_result(request: Request):
     if poll < VOICE_RESULT_MAX_POLLS:
         twiml = make_voice_waiting_twiml(
             call_sid,
-            _VOICE_WAIT_LINES[(poll - 1) % len(_VOICE_WAIT_LINES)],
+            _VOICE_WAIT_LINES.get(poll, ""),
             poll=poll + 1,
             base_url=base_url,
         )
