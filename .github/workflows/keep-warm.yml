@@ -1,0 +1,32 @@
+name: Keep Warm
+
+# Render free tier spins the service down after ~15 min idle; a cold start then
+# drops the first Twilio call. Ping /health on a short interval to keep it up.
+# Set repo variable SWIGGY_HEALTH_URL to the deployment's /health URL.
+#
+# Caveat: GitHub-hosted scheduled runs are best-effort and can be delayed or
+# skipped under load, so this reduces cold starts but does not guarantee zero.
+# For a hard guarantee use an external monitor (cron-job.org, UptimeRobot).
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health endpoint
+        run: |
+          URL="${{ vars.SWIGGY_HEALTH_URL }}"
+          if [ -z "$URL" ]; then
+            echo "::error::Repo variable SWIGGY_HEALTH_URL is not set"
+            exit 1
+          fi
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 "$URL")
+          echo "health $URL -> $code"
+          [ "$code" = "200" ]
