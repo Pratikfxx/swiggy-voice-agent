@@ -288,3 +288,39 @@ def test_plain_string_content_passes_through():
     import agent
 
     assert agent._text_after_last_tool("Done. Arriving in 12 minutes.") == "Done. Arriving in 12 minutes."
+
+
+def test_checkout_is_disabled_until_the_caller_confirms(monkeypatch):
+    """The spend gate is what stands between a demo and a real order.
+
+    checkout is only offered to the model when the caller's latest message
+    reads as a confirmation. Without that, an over-eager model cannot spend
+    money even if it decides to.
+    """
+    import agent
+
+    captured = {}
+
+    class FakeResponse:
+        stop_reason = "end_turn"
+        content = [type("B", (), {"type": "text", "text": "Milk, 59 rupees. Confirm?"})()]
+
+    def fake_create(surface, live, **kwargs):
+        captured["tools"] = kwargs.get("tools")
+        return FakeResponse()
+
+    monkeypatch.setattr(agent, "_create_message", fake_create)
+    monkeypatch.setattr(agent, "get_access_tokens", lambda keys, user_id=None: {"im": "tok"})
+    monkeypatch.setattr(agent.swiggy_address, "get_cached_default", lambda: {"id": "A1", "label": "Home", "area": ""})
+    monkeypatch.setattr(agent.swiggy_address, "maybe_background_refresh", lambda: None)
+
+    def spend_enabled_for(message):
+        agent.run_agent(message, [], surface="voice", session_id="s", user_id="u")
+        for tool in captured["tools"]:
+            configs = tool.get("configs") if isinstance(tool, dict) else None
+            if configs and "checkout" in configs:
+                return configs["checkout"]["enabled"]
+        raise AssertionError("checkout config not found")
+
+    assert spend_enabled_for("get me milk") is False
+    assert spend_enabled_for("haan") is True
