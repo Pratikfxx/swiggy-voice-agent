@@ -51,3 +51,41 @@ class DeployConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_demo_mode_has_exactly_one_default():
+    """agent.py and swiggy_tools.py used to disagree — live agent, mock data."""
+    import pathlib, re
+
+    sources = [p for p in pathlib.Path(".").glob("*.py")]
+    offenders = []
+    for path in sources:
+        for match in re.finditer(r'getenv\(\s*["\']DEMO_MODE["\']\s*,\s*["\']([^"\']+)["\']', path.read_text()):
+            offenders.append(f"{path.name}:{match.group(1)}")
+    assert len(offenders) <= 1, f"DEMO_MODE default defined in several places: {offenders}"
+
+
+def test_swiggy_server_urls_live_in_one_place():
+    """swiggy_auth.py used to repeat the URLs that swiggy_scope.py declares."""
+    import pathlib
+
+    hits = []
+    for path in pathlib.Path(".").glob("*.py"):
+        if path.name == "swiggy_scope.py":
+            continue
+        text = path.read_text()
+        if "https://mcp.swiggy.com/im" in text or "https://mcp.swiggy.com/food" in text:
+            hits.append(path.name)
+    assert hits == [], f"Swiggy MCP server URLs duplicated in: {hits}"
+
+
+def test_agent_and_tools_agree_on_demo_mode(monkeypatch):
+    import importlib
+
+    monkeypatch.delenv("DEMO_MODE", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    import agent, swiggy_tools
+
+    importlib.reload(swiggy_tools)
+    importlib.reload(agent)
+    assert agent.DEMO_MODE == swiggy_tools.DEMO_MODE

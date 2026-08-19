@@ -12,13 +12,15 @@ real delivery times from Mumbai/Bangalore/Delhi.
 """
 
 import os
+
+from swiggy_scope import demo_mode
 import random
 import time
 from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
-DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() == "true"
+DEMO_MODE = demo_mode()
 
 
 # ─────────────────────────────────────────────

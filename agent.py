@@ -25,6 +25,7 @@ import swiggy_address
 from swiggy_search import search_and_add_to_cart
 from swiggy_auth import get_access_tokens
 from swiggy_scope import (
+    demo_mode,
     ACTIVE_SWIGGY_SERVERS,
     ACTIVE_TOKEN_KEYS,
     SERVER_AUTH_KEYS as MCP_AUTH_KEYS,
@@ -68,7 +69,7 @@ CHAT_MAX_TOKENS = int(os.getenv("CHAT_MAX_TOKENS", "1024"))
 # Empty string disables.
 VOICE_OVERLOAD_FALLBACK = os.getenv("VOICE_OVERLOAD_FALLBACK", "claude-sonnet-5")
 CHAT_OVERLOAD_FALLBACK = os.getenv("CHAT_OVERLOAD_FALLBACK", "claude-haiku-4-5")
-DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
+DEMO_MODE = demo_mode()
 DEFAULT_ADDRESS_ID = os.getenv("DEFAULT_ADDRESS_ID", "")
 DEFAULT_ADDRESS_LABEL = os.getenv("DEFAULT_ADDRESS_LABEL", "Home")
 DEFAULT_ADDRESS_AREA = os.getenv("DEFAULT_ADDRESS_AREA", "")

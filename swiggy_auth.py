@@ -27,6 +27,8 @@ from typing import Any
 
 import requests
 
+from swiggy_scope import SERVER_AUTH_KEYS, SWIGGY_SERVER_URLS
+
 import store
 
 
@@ -34,10 +36,12 @@ authorization_endpoint = "https://mcp.swiggy.com/auth/authorize"
 token_endpoint = "https://mcp.swiggy.com/auth/token"
 client_id = "swiggy-mcp"
 scope = "mcp:tools mcp:resources mcp:prompts"
+# Derived from swiggy_scope so the server URLs exist in exactly one place.
+# They used to be written out here as well, so changing one file silently left
+# the other pointing at the old host.
 RESOURCES = {
-    "food": "https://mcp.swiggy.com/food",
-    "im": "https://mcp.swiggy.com/im",
-    "dineout": "https://mcp.swiggy.com/dineout",
+    SERVER_AUTH_KEYS[server]: url
+    for server, url in SWIGGY_SERVER_URLS.items()
 }
 ENV_TOKEN_VARS = {
     "food": "SWIGGY_FOOD_TOKEN",
