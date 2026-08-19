@@ -50,6 +50,17 @@ RECIPE_DB: dict[str, list[dict]] = {
         {"name": "ghee", "qty": "3", "unit": "tbsp"},
         {"name": "cooking oil", "qty": "4", "unit": "tbsp"},
     ],
+    "paneer butter masala": [
+        {"name": "paneer", "qty": "250", "unit": "g"},
+        {"name": "tomato puree", "qty": "400", "unit": "g"},
+        {"name": "butter", "qty": "50", "unit": "g"},
+        {"name": "fresh cream", "qty": "100", "unit": "ml"},
+        {"name": "onion", "qty": "2", "unit": "pcs"},
+        {"name": "ginger garlic paste", "qty": "2", "unit": "tbsp"},
+        {"name": "kasuri methi", "qty": "1", "unit": "tbsp"},
+        {"name": "garam masala", "qty": "1", "unit": "tbsp"},
+        {"name": "cashew nuts", "qty": "50", "unit": "g"},
+    ],
     "paneer biryani": [
         {"name": "basmati rice", "qty": "500", "unit": "g"},
         {"name": "paneer", "qty": "400", "unit": "g"},
@@ -276,7 +287,10 @@ def get_recipe_ingredients(dish_name: str) -> dict:
                 "note": f"Showing ingredients for {recipe_name.title()}"
             }
 
-    # Partial word match
+    # Partial word match. Require at least TWO shared words: a single shared
+    # word is not a dish, it is a coincidence. "paneer butter masala" used to
+    # match "paneer biryani" on the word "paneer" alone and confidently return
+    # biryani ingredients — rice, mint, biryani masala — for a curry.
     key_words = set(key.split())
     best_match = None
     best_score = 0
@@ -287,7 +301,7 @@ def get_recipe_ingredients(dish_name: str) -> dict:
             best_score = overlap
             best_match = recipe_name
 
-    if best_match and best_score > 0:
+    if best_match and best_score >= 2:
         return {
             "found": True,
             "dish": best_match.title(),
