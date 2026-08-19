@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import sys
 import tempfile
@@ -324,3 +325,72 @@ def test_checkout_is_disabled_until_the_caller_confirms(monkeypatch):
 
     assert spend_enabled_for("get me milk") is False
     assert spend_enabled_for("haan") is True
+
+
+class FastConfirmTests(unittest.TestCase):
+    """Skipping the second model round trip is worth ~4.4s of a 13.2s turn,
+    but only when the sentence is fully determined by the cart tool's output."""
+
+    def _line(self, raw, user_message="milk and bread", enabled=True):
+        import agent
+
+        with patch.object(agent, "VOICE_FAST_CONFIRM", enabled):
+            return agent._fast_confirm_line("search_and_add_to_cart", json.dumps(raw), user_message)
+
+    def test_clean_cart_produces_a_spoken_confirmation(self):
+        line = self._line({
+            "added": [{"item": "milk"}, {"item": "bread"}, {"item": "eggs"}],
+            "not_found": [], "cart_updated": True, "subtotal": 319,
+        })
+        self.assertEqual(line, "milk, bread and eggs, 319 rupees. Confirm?")
+
+    def test_single_item_reads_naturally(self):
+        line = self._line({"added": [{"item": "milk"}], "not_found": [], "cart_updated": True, "subtotal": 59})
+        self.assertEqual(line, "milk, 59 rupees. Confirm?")
+
+    def test_missing_items_fall_through_to_the_model(self):
+        self.assertEqual(self._line({
+            "added": [{"item": "milk"}], "not_found": ["caviar"],
+            "cart_updated": True, "subtotal": 59,
+        }), "")
+
+    def test_unsaved_cart_falls_through_to_the_model(self):
+        self.assertEqual(self._line({
+            "added": [{"query": "milk"}], "not_found": [], "cart_updated": False, "subtotal": 59,
+        }), "")
+
+    def test_non_ascii_request_falls_through_so_hindi_is_answered_in_hindi(self):
+        self.assertEqual(self._line(
+            {"added": [{"item": "doodh"}], "not_found": [], "cart_updated": True, "subtotal": 59},
+            user_message="mujhe doodh chahiye है",
+        ), "")
+
+    def test_disabled_by_default_flag_falls_through(self):
+        self.assertEqual(self._line(
+            {"added": [{"item": "milk"}], "not_found": [], "cart_updated": True, "subtotal": 59},
+            enabled=False,
+        ), "")
+
+    def test_other_tools_are_never_short_circuited(self):
+        import agent
+
+        with patch.object(agent, "VOICE_FAST_CONFIRM", True):
+            self.assertEqual(agent._fast_confirm_line("get_order_history", "{}", "usual"), "")
+
+    def test_speaks_the_callers_words_not_the_catalogue_title(self):
+        line = self._line({
+            "added": [
+                {"item": "milk", "name": "Mother Dairy Pasteurised Homogenised Cow Milk"},
+                {"item": "bread", "name": "NOICE 5 Seed Multigrain Bread (Zero Maida)"},
+            ],
+            "not_found": [], "cart_updated": True, "subtotal": 79,
+        })
+        self.assertEqual(line, "milk and bread, 79 rupees. Confirm?")
+        self.assertNotIn("Pasteurised", line)
+
+    def test_multiple_quantities_fall_through_so_counts_are_not_understated(self):
+        line = self._line({
+            "added": [{"item": "butter", "quantity": 2}],
+            "not_found": [], "cart_updated": True, "subtotal": 504,
+        })
+        self.assertEqual(line, "")

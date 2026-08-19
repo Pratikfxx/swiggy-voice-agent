@@ -69,6 +69,14 @@ CHAT_MAX_TOKENS = int(os.getenv("CHAT_MAX_TOKENS", "1024"))
 # Empty string disables.
 VOICE_OVERLOAD_FALLBACK = os.getenv("VOICE_OVERLOAD_FALLBACK", "claude-sonnet-5")
 CHAT_OVERLOAD_FALLBACK = os.getenv("CHAT_OVERLOAD_FALLBACK", "claude-haiku-4-5")
+# Composing "milk, bread and eggs, 319 rupees. Confirm?" costs a second model
+# round trip — measured at 4.4s of a 13.2s turn to emit 26 tokens whose shape
+# the voice prompt already dictates and whose contents the cart tool already
+# returned. When enabled, voice turns say that line directly and skip the call.
+# Off by default: it bypasses the model's judgement, so it must be judged by
+# ear on a real call before it becomes the default.
+VOICE_FAST_CONFIRM = os.getenv("VOICE_FAST_CONFIRM", "true").lower() == "true"
+
 DEMO_MODE = demo_mode()
 DEFAULT_ADDRESS_ID = os.getenv("DEFAULT_ADDRESS_ID", "")
 DEFAULT_ADDRESS_LABEL = os.getenv("DEFAULT_ADDRESS_LABEL", "Home")
@@ -648,6 +656,54 @@ def _text_after_last_tool(content) -> str:
     return " ".join(tail).strip() or _content_text(content)
 
 
+def _fast_confirm_line(tool_name: str, raw_result: str, user_message: str) -> str:
+    """A spoken confirmation built from the cart tool's own output, or "".
+
+    Only for the clean case: the voice surface, every requested item found,
+    the cart actually updated, and an ASCII request — a Hindi or Hinglish
+    caller must still get a reply composed in their language, so those fall
+    through to the model.
+    """
+    if not VOICE_FAST_CONFIRM or tool_name != "search_and_add_to_cart":
+        return ""
+    if not user_message.isascii():
+        return ""
+
+    try:
+        result = json.loads(raw_result)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+
+    added = result.get("added") or []
+    if not added or result.get("not_found") or not result.get("cart_updated"):
+        return ""
+    # The line names items but not counts, so "two packets of butter" would be
+    # understated. Anything other than one of each goes back to the model.
+    if any(entry.get("quantity", 1) != 1 for entry in added):
+        return ""
+
+    # "item" is what the caller asked for ("milk"); "name" is the full
+    # catalogue title ("Mother Dairy Pasteurised Homogenised Cow Milk"), which
+    # is unbearable read aloud. Prefer the caller's own words.
+    names = [str(entry.get("item") or entry.get("name") or "").strip() for entry in added]
+    names = [n for n in names if n]
+    if not names:
+        return ""
+
+    if len(names) == 1:
+        listed = names[0]
+    else:
+        listed = ", ".join(names[:-1]) + " and " + names[-1]
+
+    subtotal = result.get("subtotal")
+    try:
+        rupees = int(round(float(subtotal)))
+    except (TypeError, ValueError):
+        return ""
+
+    return f"{listed}, {rupees} rupees. Confirm?"
+
+
 def _spend_server_for_tool(tool_name: str) -> str:
     for server_name, tool_names in SPEND_TOOLS.items():
         if tool_name in tool_names:
@@ -1037,17 +1093,25 @@ def _run_agent_live(
             if not local_tool_uses:
                 break
 
-            tool_results = [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": b.id,
-                    "content": execute_tool(
-                        b.name, b.input, session_id=session_id, user_id=user_id
-                    ),
-                }
-                for b in local_tool_uses
-            ]
+            tool_results = []
+            fast_line = ""
+            for b in local_tool_uses:
+                raw = execute_tool(
+                    b.name, b.input, session_id=session_id, user_id=user_id
+                )
+                tool_results.append(
+                    {"type": "tool_result", "tool_use_id": b.id, "content": raw}
+                )
+                if surface == "voice" and not fast_line:
+                    fast_line = _fast_confirm_line(b.name, raw, user_message)
             messages.append({"role": "user", "content": tool_results})
+
+            if fast_line:
+                # The cart is built and the sentence is fully determined by its
+                # contents; a second model round trip would only re-say it.
+                messages.append({"role": "assistant", "content": fast_line})
+                _save_live_order_if_any([], session_id or user_id)
+                return _agent_result(fast_line, messages, False, return_meta)
 
         assistant_blocks = []
         for message in messages:
