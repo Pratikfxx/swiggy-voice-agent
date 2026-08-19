@@ -253,3 +253,38 @@ class AgentTimeoutTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_reply_uses_only_text_after_the_last_tool_call():
+    """A server-side MCP turn holds narration, tool blocks, then the answer.
+
+    Joining all of it made the agent ask and answer itself in one breath:
+    "Add this one? Perfect! It is in your cart." — two voices on one call.
+    """
+    import agent
+
+    content = [
+        {"type": "text", "text": "Add this one?"},
+        {"type": "mcp_tool_use", "name": "update_cart", "id": "t1", "input": {}},
+        {"type": "mcp_tool_result", "tool_use_id": "t1", "is_error": False},
+        {"type": "text", "text": "Amul Taaza is in your cart, 59 rupees. Confirm?"},
+    ]
+    spoken = agent._text_after_last_tool(content)
+    assert spoken == "Amul Taaza is in your cart, 59 rupees. Confirm?"
+    assert "Add this one?" not in spoken
+
+
+def test_reply_falls_back_when_model_only_spoke_before_tools():
+    import agent
+
+    content = [
+        {"type": "text", "text": "Checking that now."},
+        {"type": "mcp_tool_use", "name": "search_products", "id": "t1", "input": {}},
+    ]
+    assert agent._text_after_last_tool(content) == "Checking that now."
+
+
+def test_plain_string_content_passes_through():
+    import agent
+
+    assert agent._text_after_last_tool("Done. Arriving in 12 minutes.") == "Done. Arriving in 12 minutes."

@@ -93,6 +93,9 @@ def clean_for_voice(text: str) -> str:
     text = re.sub(r'\s{2,}', ' ', text)
     # Translating punctuation can leave " ," or " ." behind.
     text = re.sub(r'\s+([,.!?])', r'\1', text)
+    # Newline-to-". " conversion can leave "instead?." or "done..".
+    text = re.sub(r'([.!?])\1+', r'\1', text)
+    text = re.sub(r'([!?])\.', r'\1', text)
     return text.strip()
 
 load_dotenv()
@@ -166,7 +169,11 @@ VOICE_RESULT_MAX_POLLS = int(os.getenv("VOICE_RESULT_MAX_POLLS", "12"))
 # The agent now batch-searches multiple items in parallel (~one search's time),
 # so a normal grocery list no longer risks the voice deadline. Only trip the
 # one-at-a-time guard for long lists; smaller ones go straight to the agent.
-_VOICE_MULTI_ITEM_GUARD = int(os.getenv("VOICE_MULTI_ITEM_GUARD", "6"))
+# search_and_add_to_cart fans every query over ONE connection and caps at 12,
+# so a normal grocery list costs about one search. Bailing out at 6 made the
+# most impressive request — "milk, bread, eggs, rice, oil, sugar, salt and
+# tea" — degrade into "let's do one item at a time".
+_VOICE_MULTI_ITEM_GUARD = int(os.getenv("VOICE_MULTI_ITEM_GUARD", "12"))
 # Sparse check-ins keep the caller informed without talking over the wait.
 _VOICE_WAIT_LINES = {
     4: "Still checking Instamart.",

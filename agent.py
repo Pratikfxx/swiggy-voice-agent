@@ -622,6 +622,31 @@ def _content_text(content) -> str:
     return " ".join(text_blocks).strip()
 
 
+def _text_after_last_tool(content) -> str:
+    """The reply the caller should hear, not the narration before it.
+
+    A server-side MCP turn returns one assistant message holding text, the
+    tool_use/tool_result blocks, and then more text. Joining all of it made the
+    agent ask and answer itself in one breath — "Add this one? Perfect! It is
+    in your cart" — which on a phone call sounds like two people talking. Keep
+    only what comes after the last tool block; fall back to everything if the
+    model spoke before calling tools and never after.
+    """
+    if isinstance(content, str):
+        return content.strip()
+
+    tail: list[str] = []
+    for block in content or []:
+        block_type = _block_value(block, "type")
+        if block_type in ("tool_use", "mcp_tool_use", "tool_result", "mcp_tool_result"):
+            tail = []
+            continue
+        text = _block_value(block, "text")
+        if text:
+            tail.append(text)
+    return " ".join(tail).strip() or _content_text(content)
+
+
 def _spend_server_for_tool(tool_name: str) -> str:
     for server_name, tool_names in SPEND_TOOLS.items():
         if tool_name in tool_names:
@@ -1042,7 +1067,7 @@ def _run_agent_live(
         final_text = ""
         for message in reversed(messages):
             if message.get("role") == "assistant":
-                final_text = _content_text(message.get("content"))
+                final_text = _text_after_last_tool(message.get("content"))
                 break
 
         return _agent_result(
