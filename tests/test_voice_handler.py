@@ -215,12 +215,22 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
             async def form(self):
                 return {}
 
-        for poll, expected in ((4, "Still checking Instamart."), (8, "Almost there.")):
-            response = await voice_handler.voice_result(FakeRequest(poll))
-            twiml = response.body.decode()
+        # Follow the configured cadence rather than pinning poll numbers — the
+        # cadence is switchable per deploy via VOICE_WAIT_CADENCE.
+        configured = voice_handler._VOICE_WAIT_LINES
+        self.assertTrue(configured, "a wait cadence must be configured")
 
+        for poll, expected in configured.items():
+            twiml = (await voice_handler.voice_result(FakeRequest(poll))).body.decode()
             self.assertIn("<Say", twiml)
             self.assertIn(expected, twiml)
+
+        silent_polls = [p for p in range(1, 11) if p not in configured]
+        self.assertTrue(silent_polls, "some polls should hold silently")
+        for poll in silent_polls:
+            twiml = (await voice_handler.voice_result(FakeRequest(poll))).body.decode()
+            self.assertNotIn("<Say", twiml)
+            self.assertIn("<Redirect", twiml)
 
     def test_voice_polling_budget_allows_live_search_to_finish_without_dead_air(self):
         voice_handler = _fresh_voice_handler()

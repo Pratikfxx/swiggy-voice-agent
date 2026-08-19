@@ -174,11 +174,19 @@ VOICE_RESULT_MAX_POLLS = int(os.getenv("VOICE_RESULT_MAX_POLLS", "12"))
 # most impressive request — "milk, bread, eggs, rice, oil, sugar, salt and
 # tea" — degrade into "let's do one item at a time".
 _VOICE_MULTI_ITEM_GUARD = int(os.getenv("VOICE_MULTI_ITEM_GUARD", "12"))
-# Sparse check-ins keep the caller informed without talking over the wait.
-_VOICE_WAIT_LINES = {
-    4: "Still checking Instamart.",
-    8: "Almost there.",
+# What the caller hears while the agent works. Swiggy's users are young and
+# compare this call to opening the app, so they read silence as a broken call
+# and hang up rather than waiting politely — but a line every two seconds
+# sounds flustered. "frequent" (default) checks in about every 6 seconds;
+# "sparse" leaves ~9 second gaps. Switchable without a deploy so the cadence
+# can be judged by ear on a real call.
+_VOICE_WAIT_CADENCES = {
+    "frequent": {3: "Still checking Instamart.", 6: "Almost there.", 9: "Nearly done."},
+    "sparse": {4: "Still checking Instamart.", 8: "Almost there."},
 }
+_VOICE_WAIT_LINES = _VOICE_WAIT_CADENCES.get(
+    os.getenv("VOICE_WAIT_CADENCE", "frequent"), _VOICE_WAIT_CADENCES["frequent"]
+)
 SILENCE_REPROMPT = "I didn't catch that. Say the item again, or say cancel."
 VOICE_AGENT_TIMEOUT_MESSAGE = (
     "Swiggy is taking a bit longer. I'm still here. "
