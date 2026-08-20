@@ -371,6 +371,27 @@ class FastConfirmTests(unittest.TestCase):
             enabled=False,
         ), "")
 
+    def test_a_cart_with_other_items_falls_through_to_the_model(self):
+        """Merging means the cart can hold items from a previous call. Reading
+        back only this turn's additions hid them until checkout charged for
+        them — the "random orders" a caller received."""
+        line = self._line({
+            "added": [{"item": "milk"}],
+            "not_found": [], "cart_updated": True,
+            "subtotal": 28, "cart_total": 405,
+            "cart_has_other_items": True,
+        })
+        self.assertEqual(line, "")
+
+    def test_a_clean_cart_quotes_the_cart_total(self):
+        line = self._line({
+            "added": [{"item": "milk"}, {"item": "bread"}],
+            "not_found": [], "cart_updated": True,
+            "subtotal": 77, "cart_total": 79,
+            "cart_has_other_items": False,
+        })
+        self.assertEqual(line, "milk and bread, 79 rupees. Confirm?")
+
     def test_other_tools_are_never_short_circuited(self):
         import agent
 

@@ -105,6 +105,13 @@ ORDER_PLACEMENT_RULES = (
     "NOT go through and offer to try again. Telling someone their groceries "
     "are coming when no order exists is the worst thing you can do on this "
     "call.\n"
+    "BEFORE checkout, read back EVERYTHING in the cart and the cart total, not "
+    "just what was added this turn. The cart persists between calls, so it can "
+    "hold items the caller never mentioned today — and checkout charges for all "
+    "of them. The add tool returns cart_contents and cart_total for exactly "
+    "this. If the cart holds anything the caller has not asked for in this "
+    "call, name those items and ask whether to keep or drop them before "
+    "placing the order.\n"
     "Once checkout really has succeeded, close warmly: thank them by name if "
     "you know it, state the arrival time, and say goodbye."
 )
@@ -762,6 +769,11 @@ def _fast_confirm_line(tool_name: str, raw_result: str, user_message: str) -> st
     added = result.get("added") or []
     if not added or result.get("not_found") or not result.get("cart_updated"):
         return ""
+    # The cart may already hold items from earlier in the call or a previous
+    # one. Reading back only what was just added understates what checkout
+    # will charge for, so let the model describe the whole cart instead.
+    if result.get("cart_has_other_items"):
+        return ""
     # The line names items but not counts, so "two packets of butter" would be
     # understated. Anything other than one of each goes back to the model.
     if any(entry.get("quantity", 1) != 1 for entry in added):
@@ -780,7 +792,7 @@ def _fast_confirm_line(tool_name: str, raw_result: str, user_message: str) -> st
     else:
         listed = ", ".join(names[:-1]) + " and " + names[-1]
 
-    subtotal = result.get("subtotal")
+    subtotal = result.get("cart_total") or result.get("subtotal")
     try:
         rupees = int(round(float(subtotal)))
     except (TypeError, ValueError):

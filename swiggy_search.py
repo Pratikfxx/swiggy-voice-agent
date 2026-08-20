@@ -281,6 +281,7 @@ async def _search_and_cart(
                 if f.get("found") and f.get("spinId") and f.get("skuId")
             ]
             cart_ok, cart_err = False, ""
+            cart_lines, cart_total = [], None
             if items:
                 try:
                     items = _merge_cart_items(
@@ -293,10 +294,19 @@ async def _search_and_cart(
                     cart_ok = _cart_accepted(res)
                     if not cart_ok:
                         cart_err = _first_text(res)[:200]
+                    else:
+                        # update_cart returns the resulting cart. Report ALL of
+                        # it: merging means the cart can hold items from earlier
+                        # in the call, or from a previous call, and confirming
+                        # only what was just added hides them right up until
+                        # checkout charges for them.
+                        cart_payload = _search_payload(res) or {}
+                        cart_lines = cart_payload.get("items") or []
+                        cart_total = cart_payload.get("cartTotalAmount")
                 except Exception as exc:
                     logging.exception("update_cart failed")
                     cart_err = str(exc)[:200]
-            return found, cart_ok, cart_err
+            return found, cart_ok, cart_err, cart_lines, cart_total
 
 
 def search_and_add_to_cart(
@@ -317,7 +327,9 @@ def search_and_add_to_cart(
     except (TypeError, ValueError):
         qty = 1
 
-    found, cart_ok, cart_err = asyncio.run(_search_and_cart(cleaned, address_id, qty))
+    found, cart_ok, cart_err, cart_lines, cart_total = asyncio.run(
+        _search_and_cart(cleaned, address_id, qty)
+    )
     added = [
         {
             "item": f["query"],
@@ -330,12 +342,19 @@ def search_and_add_to_cart(
     ]
     not_found = [f["query"] for f in found if not f.get("found")]
     subtotal = sum((a["price"] or 0) * qty for a in added)
+    cart_names = [str(line.get("itemName") or "") for line in cart_lines]
     return {
         "cart_updated": cart_ok,
         "cart_error": cart_err,
         "added": added,
         "not_found": not_found,
         "subtotal": subtotal,
+        # The WHOLE cart after the merge, and the total the user will actually
+        # be charged. Confirming only what was just added hid pre-existing
+        # items until checkout billed for them.
+        "cart_contents": cart_names,
+        "cart_total": cart_total,
+        "cart_has_other_items": len(cart_names) > len(added),
     }
 
 

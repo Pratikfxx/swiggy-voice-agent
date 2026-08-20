@@ -137,3 +137,8 @@ class OrderPlacementPromptTests(unittest.TestCase):
     def test_voice_prompt_closes_warmly_after_a_real_order(self):
         agent = _fresh_agent()
         self.assertIn("thank you", agent.VOICE_SYSTEM_PROMPT.lower())
+
+    def test_prompt_requires_reading_back_the_whole_cart(self):
+        agent = _fresh_agent()
+        self.assertIn("BEFORE checkout", agent.ORDER_PLACEMENT_RULES)
+        self.assertIn("cart_total", agent.ORDER_PLACEMENT_RULES)
