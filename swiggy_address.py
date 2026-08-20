@@ -36,12 +36,24 @@ def _parse_addresses_result(result) -> dict | None:
         payload = _get_field(result, "structured_content")
 
     if not isinstance(payload, dict):
-        content = _get_field(result, "content", []) or []
-        first = content[0] if content else None
-        text = _get_field(first, "text", "")
-        if not text:
+        # Scan every block for the first JSON one. get_addresses returns
+        # human-readable prose first ("Found 29 saved addresses (page 1 of
+        # 3)"), and taking block zero is what silently emptied every product
+        # search when Swiggy added the same prose there.
+        payload = None
+        for block in _get_field(result, "content", []) or []:
+            text = _get_field(block, "text", "")
+            if not text:
+                continue
+            try:
+                candidate = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(candidate, dict):
+                payload = candidate
+                break
+        if payload is None:
             return None
-        payload = json.loads(text)
 
     addresses = payload.get("addresses") if isinstance(payload, dict) else None
     if not addresses:

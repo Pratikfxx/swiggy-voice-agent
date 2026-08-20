@@ -237,7 +237,11 @@ async def analyze_fridge_image(media_url: str) -> list[str]:
             ],
         )
 
-        raw = message.content[0].text.strip()
+        # Take the first text block, not blindly block zero — a non-text
+        # block first would raise AttributeError inside the image handler.
+        raw = next(
+            (b.text for b in message.content if getattr(b, "text", None)), ""
+        ).strip()
         if raw == "NOT_FRIDGE" or not raw:
             return []
 

@@ -238,3 +238,32 @@ def test_refusal_payload_says_the_cart_is_untouched():
     source = inspect.getsource(swiggy_search._remove_from_cart)
     assert "cart_unchanged" in source
     assert "Do NOT say the cart is empty" in source
+
+
+def test_address_parser_finds_json_behind_a_prose_block():
+    """get_addresses returns "Found 29 saved addresses (page 1 of 3)" first.
+    Taking block zero is the bug that silently emptied product searches."""
+    import types
+
+    import swiggy_address
+
+    prose = types.SimpleNamespace(text="Found 29 saved addresses (page 1 of 3):")
+    data = types.SimpleNamespace(text=json.dumps({"addresses": [
+        {"id": "A1", "addressTag": "Ghar", "addressLine": "A403 Satellite Gardens"},
+    ]}))
+    result = types.SimpleNamespace(content=[prose, data], structuredContent=None)
+
+    parsed = swiggy_address._parse_addresses_result(result)
+    assert parsed["id"] == "A1"
+    assert parsed["label"] == "Ghar"
+
+
+def test_address_parser_returns_none_when_no_block_is_json():
+    import types
+
+    import swiggy_address
+
+    result = types.SimpleNamespace(
+        content=[types.SimpleNamespace(text="no addresses here")], structuredContent=None
+    )
+    assert swiggy_address._parse_addresses_result(result) is None

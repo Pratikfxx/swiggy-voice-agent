@@ -459,11 +459,16 @@ async def _remove_from_cart(
                 for i in keep if i.get("spinId") and i.get("skuId")
             ]
             try:
+                cart_total = None
                 if items:
                     res = await session.call_tool(
                         "update_cart", {"selectedAddressId": address_id, "items": items}
                     )
                     ok = _cart_accepted(res)
+                    # Quote Swiggy's own total, not a sum of line prices: the
+                    # two differ by fees, and reading back a number the app
+                    # will not show is how a caller loses trust mid-order.
+                    cart_total = (_search_payload(res) or {}).get("cartTotalAmount")
                 else:
                     res = await session.call_tool("clear_cart", {})
                     ok = not _tool_errored(res)
@@ -475,6 +480,7 @@ async def _remove_from_cart(
             return {
                 "removed": [i.get("itemName") for i in dropped],
                 "kept": summary["items"],
+                "cart_total": cart_total,
                 "subtotal": round(summary["subtotal"]),
                 "cart_updated": ok,
             }

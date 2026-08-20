@@ -15,6 +15,7 @@ import base64
 import hashlib
 import html
 import json
+import logging
 import os
 import secrets
 import tempfile
@@ -264,7 +265,9 @@ def get_access_token(key: str, user_id: str | None = None) -> str:
         try:
             user_record = store.get_user_token(user_id, key)
         except Exception:
-            pass
+            logging.warning(
+                "per-user Swiggy token lookup failed for %s; falling back to env", key
+            )
     record = user_record
 
     if not record:
@@ -327,7 +330,9 @@ def get_access_token(key: str, user_id: str | None = None) -> str:
         try:
             store.save_user_token(user_id, key, refreshed_record)
         except Exception:
-            pass
+            # The refresh already rotated the token upstream, so losing the
+            # write means this user's link is broken until they re-link.
+            logging.exception("failed to persist refreshed Swiggy token for %s", key)
     else:
         file_store[key] = refreshed_record
         _save_store(file_store)
