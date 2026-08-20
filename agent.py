@@ -91,6 +91,24 @@ SPEND_TOOLS = {
     "swiggy-instamart": ["checkout"],
     "swiggy-dineout": ["book_table"],
 }
+ORDER_PLACEMENT_RULES = (
+    "\n\nPLACING THE ORDER: checkout REJECTS any call without a payment "
+    "method, which is why orders were silently never being placed. The UPI "
+    "options need the caller to finish payment in an app on their phone, so "
+    "they cannot be completed during a call. Use cash on delivery: call "
+    "checkout with paymentMethod=\"Cash\". Say which payment you are using in "
+    "the confirmation line — \"cash on delivery\" — so the caller is never "
+    "surprised at the door.\n"
+    "NEVER say an order is placed, and never give an order number or an "
+    "arrival time, unless a checkout tool call in THIS turn returned success. "
+    "If checkout failed or you did not call it, say plainly that the order did "
+    "NOT go through and offer to try again. Telling someone their groceries "
+    "are coming when no order exists is the worst thing you can do on this "
+    "call.\n"
+    "Once checkout really has succeeded, close warmly: thank them by name if "
+    "you know it, state the arrival time, and say goodbye."
+)
+
 CART_EDIT_RULES = (
     "\n\nCART EDITS: if the user removes, drops, cancels or changes their mind "
     "about anything already in the cart, you MUST call remove_from_cart before "
@@ -612,8 +630,9 @@ CONFIRMATION:
 - If there are more than 3 grocery items, summarize the count and name the most important 2-3 items.
 - Do not read individual prices unless the user asks.
 
-AFTER ORDER (one sentence max):
-"Done! Arriving in [ETA]."
+AFTER ORDER (only once checkout has actually succeeded):
+"Done, thank you! Arriving in [ETA]. Bye!"
+Never say this unless a checkout tool call in this turn confirmed the order.
 
 REPEAT ORDER:
 - "order my usual" / "phir se" → call get_order_history → repeat only Instamart orders. If the last order was not Instamart, ask what grocery or essential they want instead.
@@ -675,7 +694,7 @@ When fetching addresses, default to the address tagged Home or the most recently
 ADDRESS & SPEED RULES: Do NOT call get_addresses just to search - searching for food or products needs no address, so search immediately. Only resolve a delivery address when actually placing an order, and then default to the user's Home address (or most recently used) automatically. NEVER ask the user to choose an address unless they explicitly bring it up. On voice especially, keep it to one short question max before proposing an item.
 """
 
-LIVE_SYSTEM_SUFFIX = _LIVE_SYSTEM_SUFFIX_BASE + CART_EDIT_RULES
+LIVE_SYSTEM_SUFFIX = _LIVE_SYSTEM_SUFFIX_BASE + CART_EDIT_RULES + ORDER_PLACEMENT_RULES
 
 
 

@@ -110,3 +110,30 @@ class CartEditPromptTests(unittest.TestCase):
     def test_cart_rules_reach_the_live_system_prompt(self):
         agent = _fresh_agent()
         self.assertIn("CART EDITS", agent.LIVE_SYSTEM_SUFFIX)
+
+
+class OrderPlacementPromptTests(unittest.TestCase):
+    """A caller was told "Your order is already placed! ... arriving in 32
+    minutes" in 3.5 seconds — no tool ran and Swiggy had zero orders. Two
+    causes: checkout rejects a call with no payment method, and nothing
+    forbade announcing an order that was never placed."""
+
+    def test_payment_method_is_specified_for_voice(self):
+        agent = _fresh_agent()
+        rules = agent.ORDER_PLACEMENT_RULES
+        self.assertIn("paymentMethod", rules)
+        self.assertIn("Cash", rules)
+
+    def test_announcing_an_unplaced_order_is_forbidden(self):
+        agent = _fresh_agent()
+        rules = agent.ORDER_PLACEMENT_RULES
+        self.assertIn("NEVER say an order is placed", rules)
+        self.assertIn("THIS turn", rules)
+
+    def test_rules_reach_the_live_prompt(self):
+        agent = _fresh_agent()
+        self.assertIn("PLACING THE ORDER", agent.LIVE_SYSTEM_SUFFIX)
+
+    def test_voice_prompt_closes_warmly_after_a_real_order(self):
+        agent = _fresh_agent()
+        self.assertIn("thank you", agent.VOICE_SYSTEM_PROMPT.lower())
