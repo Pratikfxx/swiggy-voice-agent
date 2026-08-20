@@ -392,6 +392,17 @@ class FastConfirmTests(unittest.TestCase):
         })
         self.assertEqual(line, "milk and bread, 79 rupees. Confirm?")
 
+    def test_a_formatted_rupee_total_is_still_spoken(self):
+        """cart_total comes back as "\u20b979", not 79, and the float() on it
+        failed silently — disabling the shortcut entirely."""
+        line = self._line({
+            "added": [{"item": "milk"}, {"item": "bread"}],
+            "not_found": [], "cart_updated": True,
+            "subtotal": 77, "cart_total": "\u20b979",
+            "cart_has_other_items": False,
+        })
+        self.assertEqual(line, "milk and bread, 79 rupees. Confirm?")
+
     def test_other_tools_are_never_short_circuited(self):
         import agent
 

@@ -792,7 +792,10 @@ def _fast_confirm_line(tool_name: str, raw_result: str, user_message: str) -> st
     else:
         listed = ", ".join(names[:-1]) + " and " + names[-1]
 
+    # cart_total arrives as a formatted string like "\u20b91072".
     subtotal = result.get("cart_total") or result.get("subtotal")
+    if isinstance(subtotal, str):
+        subtotal = re.sub(r"[^\d.]", "", subtotal)
     try:
         rupees = int(round(float(subtotal)))
     except (TypeError, ValueError):
