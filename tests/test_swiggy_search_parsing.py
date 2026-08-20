@@ -179,3 +179,24 @@ def test_named_pack_size_wins_over_cheapest():
 def test_unavailable_pack_size_falls_back_to_cheapest():
     result = _result(PROSE, json.dumps({"products": [_coke_product()]}))
     assert swiggy_search._top_match("99 pack of diet coke", result, 99)["skuId"] == "ONE"
+
+
+def test_keep_list_matches_the_right_lines():
+    """Dropping by "sugar" also removed "Monster Energy Zero Sugar", which is
+    why the tool prefers naming what to keep."""
+    monster = "Monster Energy Ultra Zero Sugar350ml, Coca-Cola Zero Can300ml"
+    assert swiggy_search._matches(monster, "monster") is True
+    assert swiggy_search._matches("Coca-Cola Diet Coke Can 330ml", "diet coke") is True
+    assert swiggy_search._matches("NOICE 5 Seed Multigrain Bread", "diet coke") is False
+
+
+def test_word_boundaries_stop_partial_word_hits():
+    assert swiggy_search._matches("Amul Butter", "but") is True      # prefix is intended
+    assert swiggy_search._matches("Amul Butter", "rebutter") is False
+
+
+def test_removal_requires_something_to_go_on():
+    import asyncio
+
+    out = asyncio.run(swiggy_search._remove_from_cart([], [], "ADDR1"))
+    assert "error" in out

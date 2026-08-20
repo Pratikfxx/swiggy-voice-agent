@@ -337,3 +337,110 @@ def search_and_add_to_cart(
         "not_found": not_found,
         "subtotal": subtotal,
     }
+
+
+def _cart_summary(items: list[dict]) -> dict:
+    return {
+        "items": [
+            {"name": i.get("itemName"), "variant": i.get("itemVariant"),
+             "quantity": i.get("quantity"), "price": i.get("discountedFinalPrice", i.get("mrp"))}
+            for i in items
+        ],
+        "subtotal": sum(
+            float(i.get("discountedFinalPrice") or i.get("mrp") or 0) * int(i.get("quantity") or 1)
+            for i in items
+        ),
+    }
+
+
+def _matches(name: str, term: str) -> bool:
+    """Whole-word match of a caller's term against a catalogue name.
+
+    Substring matching removed a Monster Energy because the caller said
+    "sugar" and the product is "Monster Energy Ultra Zero Sugar350ml".
+    Word boundaries make that a near-miss instead of a false positive, but
+    catalogue names are still unreliable — "cinnamon" never matches
+    "Supreme Harvest Cassia (Taj) Roll" — which is why keep-lists exist.
+    """
+    words = [w for w in re.split(r"[^a-z0-9]+", term.lower()) if w]
+    if not words:
+        return False
+    lowered = name.lower()
+    return all(re.search(rf"\b{re.escape(w)}", lowered) for w in words)
+
+
+async def _remove_from_cart(
+    remove: list[str], keep_only: list[str], address_id: str
+) -> dict:
+    """Drop or retain cart lines by name, then write the cart back.
+
+    Doing this through the model meant it had to read the whole cart and echo
+    back every skuId it wanted to keep — a 23.6s turn that blew the voice
+    deadline. Prefer keep_only: naming the two things to keep is far more
+    reliable than naming the six to drop.
+    """
+    remove = [t.strip() for t in (remove or []) if str(t).strip()]
+    keep_only = [t.strip() for t in (keep_only or []) if str(t).strip()]
+    if not remove and not keep_only:
+        return {"error": "name the items to remove, or the items to keep"}
+
+    token = get_access_token(_IM_TOKEN_KEY)
+    async with open_authenticated_mcp(_IM_URL, token) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            try:
+                cart = await session.call_tool("get_cart", {})
+            except Exception as exc:
+                logging.exception("get_cart failed during removal")
+                return {"error": str(exc)[:200], "cart_updated": False}
+
+            lines = (_search_payload(cart) or {}).get("items") or []
+            keep, dropped = [], []
+            for line in lines:
+                name = str(line.get("itemName") or "")
+                if keep_only:
+                    hit = any(_matches(name, term) for term in keep_only)
+                else:
+                    hit = not any(_matches(name, term) for term in remove)
+                (keep if hit else dropped).append(line)
+
+            if not dropped:
+                return {"removed": [], "kept": [i.get("itemName") for i in keep],
+                        "cart_updated": False, "error": "nothing in the cart matched"}
+
+            items = [
+                {"spinId": i.get("spinId"), "skuId": i.get("skuId"),
+                 "quantity": int(i.get("quantity") or 1)}
+                for i in keep if i.get("spinId") and i.get("skuId")
+            ]
+            try:
+                if items:
+                    res = await session.call_tool(
+                        "update_cart", {"selectedAddressId": address_id, "items": items}
+                    )
+                    ok = _cart_accepted(res)
+                else:
+                    res = await session.call_tool("clear_cart", {})
+                    ok = not _tool_errored(res)
+            except Exception as exc:
+                logging.exception("update_cart failed during removal")
+                return {"error": str(exc)[:200], "cart_updated": False}
+
+            summary = _cart_summary(keep)
+            return {
+                "removed": [i.get("itemName") for i in dropped],
+                "kept": summary["items"],
+                "subtotal": round(summary["subtotal"]),
+                "cart_updated": ok,
+            }
+
+
+def remove_from_cart(
+    address_id: str,
+    remove: list[str] | None = None,
+    keep_only: list[str] | None = None,
+) -> dict:
+    """Sync wrapper. Runs in a worker thread, so asyncio.run is safe here."""
+    if not address_id:
+        return {"error": "address_id is required"}
+    return asyncio.run(_remove_from_cart(remove or [], keep_only or [], address_id))

@@ -22,7 +22,7 @@ from recipe_engine import get_recipe_ingredients as _get_recipe_ingredients
 from order_history import save_order, get_recent_orders
 import store
 import swiggy_address
-from swiggy_search import search_and_add_to_cart
+from swiggy_search import remove_from_cart, search_and_add_to_cart
 from swiggy_auth import get_access_tokens
 from swiggy_scope import (
     demo_mode,
@@ -352,6 +352,34 @@ TOOLS = [
         }
     },
     {
+        "name": "remove_from_cart",
+        "description": (
+            "Remove items from the Instamart cart in ONE call, keeping the rest. "
+            "Use this whenever the user drops, cancels or changes their mind about "
+            "part of the cart. STRONGLY PREFER keep_only: name the few items to "
+            "KEEP rather than the many to drop, because catalogue names are "
+            "misleading — dropping by the word 'sugar' also removes 'Monster "
+            "Energy Zero Sugar'. Do NOT call get_cart and update_cart yourself to "
+            "do this; this tool reads the cart, rewrites it and returns what is "
+            "left with the new subtotal."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "address_id": {"type": "string", "description": "The delivery addressId for this order."},
+                "keep_only": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Items to KEEP, e.g. ['monster', 'diet coke']. Everything else is removed.",
+                },
+                "remove": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Items to remove. Only use when keeping is harder to express than dropping.",
+                },
+            },
+            "required": ["address_id"],
+        },
+    },
+    {
         "name": "search_and_add_to_cart",
         "description": (
             "Search MANY Instamart items in parallel AND add the best in-stock "
@@ -388,7 +416,7 @@ TOOLS = [
 
 LIVE_LOCAL_TOOLS = [
     tool for tool in TOOLS
-    if tool["name"] in {"get_recipe_ingredients", "get_order_history", "search_and_add_to_cart"}
+    if tool["name"] in {"get_recipe_ingredients", "get_order_history", "search_and_add_to_cart", "remove_from_cart"}
 ]
 LOCAL_NAMES = {tool["name"] for tool in LIVE_LOCAL_TOOLS}
 
@@ -417,6 +445,13 @@ def execute_tool(
 
         elif tool_name == "get_recipe_ingredients":
             result = _get_recipe_ingredients(tool_input["dish_name"])
+
+        elif tool_name == "remove_from_cart":
+            result = remove_from_cart(
+                tool_input["address_id"],
+                remove=tool_input.get("remove"),
+                keep_only=tool_input.get("keep_only"),
+            )
 
         elif tool_name == "search_and_add_to_cart":
             result = search_and_add_to_cart(
