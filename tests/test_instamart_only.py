@@ -78,3 +78,18 @@ class InstamartOnlyTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AddressPromptTests(unittest.TestCase):
+    """A caller asked to deliver to "Rithik" — a real saved address — and was
+    told it was not saved. The model denied it without calling get_addresses."""
+
+    def test_prompt_forbids_denying_an_address_without_looking(self):
+        agent = _fresh_agent()
+        rules = agent.ADDRESS_SELECTION_RULES
+        self.assertIn("MUST call get_addresses", rules)
+        self.assertIn("NEVER say an address is not saved", rules)
+
+    def test_prompt_states_the_pagination_limit(self):
+        agent = _fresh_agent()
+        self.assertIn("10 most recently used", agent.ADDRESS_SELECTION_RULES)

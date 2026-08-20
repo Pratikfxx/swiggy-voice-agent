@@ -91,6 +91,23 @@ SPEND_TOOLS = {
     "swiggy-instamart": ["checkout"],
     "swiggy-dineout": ["book_table"],
 }
+ADDRESS_SELECTION_RULES = (
+    "IF the user names ANY delivery destination other than the default — an "
+    "office, a label, a person's name, a locality — you MUST call get_addresses "
+    "before responding. Saved address tags are often personal names or "
+    "nicknames, so you cannot tell from the word alone whether it is a saved "
+    "address. NEVER say an address is not saved unless you have just called "
+    "get_addresses and read the list. Match the entry whose addressTag or "
+    "addressLine matches what they said, take its `id`, and use THAT id as the "
+    "addressId for EVERY subsequent search_products, update_cart and checkout "
+    "call — all tools in one order must use the same chosen addressId, never a "
+    "mix. get_addresses returns only the 10 most recently used addresses and "
+    "takes no page argument, so if there is no match, say which saved addresses "
+    "you can see, name two or three of them, and ask which one they mean. Never "
+    "silently fall back to the default address when the user asked for a "
+    "different one."
+)
+
 LIVE_AUTH_NOT_READY_MESSAGE = (
     "Swiggy login is not ready for Instamart yet. "
     "Please refresh the Instamart login and try again."
@@ -1030,17 +1047,11 @@ def _run_agent_live(
         if addr_id:
             system_prompt += (
                 f"\n\nDEFAULT DELIVERY ADDRESS: {addr_label} ({addr_area}), "
-                f"addressId {addr_id}. By default use this addressId for "
-                "search_products, update_cart (as selectedAddressId), and checkout, "
-                "and do NOT call get_addresses.\n"
-                "IF the user asks to deliver to a DIFFERENT saved address (an office, "
-                "another label, a different city): call get_addresses, find the entry "
-                "whose addressTag/addressLine matches what they said, take its `id`, and "
-                "use THAT id as the addressId for EVERY subsequent search_products, "
-                "update_cart, and checkout call — all cart and order tools in one order "
-                "must use the same chosen addressId, never a mix. If no saved address "
-                "matches, say so and stop; never place an order to the default address "
-                "when the user asked for a different one."
+                f"addressId {addr_id}. Use this addressId by default for "
+                "search_products, update_cart (as selectedAddressId), and checkout. "
+                "Do not call get_addresses merely to start searching — searching "
+                "needs no address lookup.\n"
+                + ADDRESS_SELECTION_RULES
             )
         confirmed = _is_confirmation(user_message)
         active = _route_servers(user_message, surface)

@@ -310,11 +310,21 @@ def get_recipe_ingredients(dish_name: str) -> dict:
             "note": f"Closest match found: {best_match.title()}"
         }
 
+    # The curated database holds ~21 dishes; callers ask for anything. Telling
+    # the model to "try a common dish name" made it give up on french toast,
+    # maggi, dosa and everything else outside the list. It knows these recipes
+    # perfectly well, so hand the job back to it instead of failing.
     return {
         "found": False,
         "dish": dish_name,
         "ingredients": [],
-        "note": f"Recipe not found for '{dish_name}'. Try a common dish name."
+        "note": (
+            f"No curated recipe for '{dish_name}'. Do NOT tell the user you "
+            f"cannot help. Work out the shop-bought ingredients for "
+            f"'{dish_name}' yourself — real Instamart products a person buys, "
+            "never sub-recipes to cook from scratch — and pass that list "
+            "straight to search_and_add_to_cart."
+        ),
     }
 
 

@@ -36,3 +36,23 @@ def test_paneer_butter_masala_is_a_curry_not_a_biryani():
 def test_known_dishes_still_resolve():
     assert "chicken" in _names("chicken biryani")
     assert "fettuccine pasta" in _names("alfredo pasta")
+
+
+def test_unknown_dish_hands_the_job_back_to_the_model():
+    """A 21-dish database cannot cover what callers ask for.
+
+    Telling the model to "try a common dish name" made it give up on french
+    toast, maggi and dosa — dishes it knows perfectly well.
+    """
+    result = get_recipe_ingredients("french toast")
+    assert result["found"] is False
+    note = result["note"].lower()
+    assert "cannot help" in note or "do not tell" in note
+    assert "search_and_add_to_cart" in result["note"]
+    assert "try a common dish name" not in note
+
+
+def test_curated_dishes_do_not_take_the_fallback_path():
+    result = get_recipe_ingredients("alfredo pasta")
+    assert result["found"] is True
+    assert "search_and_add_to_cart" not in result["note"]
