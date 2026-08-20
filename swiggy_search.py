@@ -369,6 +369,21 @@ def _matches(name: str, term: str) -> bool:
     return all(re.search(rf"\b{re.escape(w)}", lowered) for w in words)
 
 
+def _partition_cart(
+    lines: list[dict], remove: list[str], keep_only: list[str]
+) -> tuple[list[dict], list[dict]]:
+    """Split cart lines into (keep, drop). Pure, so it is testable offline."""
+    keep, dropped = [], []
+    for line in lines:
+        name = str(line.get("itemName") or "")
+        if keep_only:
+            hit = any(_matches(name, term) for term in keep_only)
+        else:
+            hit = not any(_matches(name, term) for term in remove)
+        (keep if hit else dropped).append(line)
+    return keep, dropped
+
+
 async def _remove_from_cart(
     remove: list[str], keep_only: list[str], address_id: str
 ) -> dict:
@@ -395,14 +410,21 @@ async def _remove_from_cart(
                 return {"error": str(exc)[:200], "cart_updated": False}
 
             lines = (_search_payload(cart) or {}).get("items") or []
-            keep, dropped = [], []
-            for line in lines:
-                name = str(line.get("itemName") or "")
-                if keep_only:
-                    hit = any(_matches(name, term) for term in keep_only)
-                else:
-                    hit = not any(_matches(name, term) for term in remove)
-                (keep if hit else dropped).append(line)
+            keep, dropped = _partition_cart(lines, remove, keep_only)
+
+            # A keep-list that matches nothing must never mean "delete
+            # everything". "keep only the drinks" matched no product — they are
+            # named "Monster Energy Ultra Zero Sugar" and "Diet Coke Can" — and
+            # emptied the cart. Refuse, and say what is actually in there.
+            if keep_only and not keep:
+                return {
+                    "removed": [], "cart_updated": False,
+                    "cart_contents": [i.get("itemName") for i in lines],
+                    "error": (
+                        "keep_only matched nothing in the cart, so nothing was "
+                        "removed. Use the product names listed in cart_contents."
+                    ),
+                }
 
             if not dropped:
                 return {"removed": [], "kept": [i.get("itemName") for i in keep],

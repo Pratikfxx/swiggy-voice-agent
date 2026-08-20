@@ -200,3 +200,31 @@ def test_removal_requires_something_to_go_on():
 
     out = asyncio.run(swiggy_search._remove_from_cart([], [], "ADDR1"))
     assert "error" in out
+
+
+CART_LINES = [
+    {"itemName": "Monster Energy Ultra Zero Sugar", "skuId": "M", "spinId": "SM", "quantity": 1},
+    {"itemName": "Diet Coke Can", "skuId": "D", "spinId": "SD", "quantity": 1},
+    {"itemName": "NOICE 5 Seed Multigrain Bread", "skuId": "B", "spinId": "SB", "quantity": 1},
+]
+
+
+def test_keep_list_retains_only_the_named_products():
+    keep, dropped = swiggy_search._partition_cart(CART_LINES, [], ["monster", "diet coke"])
+    assert [k["skuId"] for k in keep] == ["M", "D"]
+    assert [d["skuId"] for d in dropped] == ["B"]
+
+
+def test_a_category_word_matches_nothing_rather_than_everything():
+    """"keep only the drinks" matched no product name — they are "Monster
+    Energy Ultra Zero Sugar" and "Diet Coke Can" — and wiped the cart. The
+    caller of this function must refuse to write an empty cart back."""
+    keep, dropped = swiggy_search._partition_cart(CART_LINES, [], ["drinks"])
+    assert keep == []
+    assert len(dropped) == 3
+
+
+def test_remove_list_drops_only_the_named_products():
+    keep, dropped = swiggy_search._partition_cart(CART_LINES, ["bread"], [])
+    assert [d["skuId"] for d in dropped] == ["B"]
+    assert [k["skuId"] for k in keep] == ["M", "D"]
