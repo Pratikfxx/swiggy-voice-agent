@@ -10,6 +10,7 @@ the Instamart MCP, so N searches cost about the time of one.
 import asyncio
 import json
 import logging
+import re
 
 from mcp import ClientSession
 
@@ -23,6 +24,55 @@ _IM_TOKEN_KEY = SERVER_AUTH_KEYS[_IM_SERVER]
 
 # Cap the fan-out so a huge list can't open dozens of connections at once.
 _MAX_QUERIES = 12
+
+
+_NUMBER_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "twelve": 12,
+}
+_PACK_UNITS = (
+    r"(?:pack|packs|packet|packets|can|cans|bottle|bottles|box|boxes|piece|pieces"
+    r"|tin|tins|litre|litres|liter|liters|kg|kgs|gram|grams|ml|dozen)"
+)
+# "six pack of diet coke" searched literally returns Red Bull, and
+# "diet coke 6 pack" returns a prebiotic soda: the extra words wreck Swiggy's
+# relevance ranking. Strip the count off the query and remember it separately.
+# A bare leading number is usually part of the product — "6 seed bread",
+# "7up", "5 star" — so only treat it as a count when a unit or "of" follows.
+_LEADING_QTY = re.compile(
+    rf"^\s*(?P<count>\d+|{'|'.join(_NUMBER_WORDS)})\s+"
+    rf"(?:(?:{_PACK_UNITS})\b\s*(?:of\s+)?|of\s+)",
+    re.I,
+)
+_TRAILING_QTY = re.compile(rf"\s*(?P<count>\d+)\s*(?:{_PACK_UNITS})\b\s*$", re.I)
+
+
+def _split_pack_size(query: str) -> tuple[str, int | None]:
+    """("six pack of diet coke") -> ("diet coke", 6). No count -> (query, None)."""
+    text = (query or "").strip()
+    count = None
+
+    match = _TRAILING_QTY.search(text)
+    if match:
+        count = int(match.group("count"))
+        text = text[: match.start()].strip()
+
+    match = _LEADING_QTY.match(text)
+    if match and match.group("count"):
+        raw = match.group("count").lower()
+        parsed = _NUMBER_WORDS.get(raw)
+        if parsed is None:
+            try:
+                parsed = int(raw)
+            except ValueError:
+                parsed = None
+        remainder = text[match.end():].strip()
+        # Only strip when something is left — "6" alone is the product.
+        if parsed is not None and remainder:
+            count = count or parsed
+            text = remainder
+
+    return (text or query).strip(), count
 
 
 def _search_payload(result) -> dict | None:
@@ -57,7 +107,7 @@ def _products_of(payload: dict) -> list:
     return (payload.get("data") or {}).get("products") or []
 
 
-def _top_match(query: str, result) -> dict:
+def _top_match(query: str, result, pack_size: int | None = None) -> dict:
     """Reduce a search_products result to the single best buyable variation."""
     payload = _search_payload(result)
     if payload is None:
@@ -66,9 +116,38 @@ def _top_match(query: str, result) -> dict:
 
     products = _products_of(payload)
     for product in products:
-        for var in product.get("variations", []):
-            if not var.get("isInStockAndAvailable", True):
-                continue
+        # Swiggy lists a product's variations largest-pack-first, so taking the
+        # first one put a six-pack of Diet Coke (Rs259) in the cart when the
+        # caller said "diet coke". Stay on this product — it is the most
+        # relevant match — but take its cheapest in-stock pack.
+        in_stock = [
+            var for var in product.get("variations", [])
+            if var.get("isInStockAndAvailable", True)
+        ]
+        if not in_stock:
+            continue
+
+        def _pack_price(var):
+            price = var.get("price") or {}
+            value = price.get("offerPrice", price.get("mrp"))
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return float("inf")
+
+        chosen = min(in_stock, key=_pack_price)
+        if pack_size and pack_size > 1:
+            # "six pack of diet coke" should get the six-pack, not the cheapest
+            # single. Variations describe themselves as e.g. "330 ml x 6".
+            wanted = re.compile(rf"x\s*{pack_size}\b", re.I)
+            matching = [
+                var for var in in_stock
+                if wanted.search(str(var.get("quantityDescription") or ""))
+            ]
+            if matching:
+                chosen = min(matching, key=_pack_price)
+
+        for var in [chosen]:
             price = var.get("price") or {}
             return {
                 "query": query,
@@ -84,12 +163,15 @@ def _top_match(query: str, result) -> dict:
 
 
 async def _search_one(session: ClientSession, query: str, address_id: str) -> dict:
+    # Search the product, not the phrasing: "six pack of diet coke" sent
+    # verbatim came back as Red Bull.
+    term, pack_size = _split_pack_size(query)
     try:
         result = await session.call_tool(
             "search_products",
-            {"addressId": address_id, "query": query, "offset": 0},
+            {"addressId": address_id, "query": term, "offset": 0},
         )
-        return _top_match(query, result)
+        return _top_match(query, result, pack_size)
     except Exception:
         logging.exception("batch search failed for %r", query)
         return {"query": query, "found": False}
@@ -143,6 +225,46 @@ def _cart_accepted(result) -> bool:
     return bool(payload) and ("cartId" in payload or "items" in payload)
 
 
+async def _existing_cart_items(session: ClientSession) -> list[dict]:
+    """The cart as update_cart wants it back: spinId, skuId, quantity.
+
+    update_cart REPLACES the whole cart with whatever it is given, so adding a
+    second item without resending the first silently deletes it. Read what is
+    already there and merge.
+    """
+    try:
+        res = await session.call_tool("get_cart", {})
+    except Exception:
+        logging.exception("get_cart failed; adding without merge would drop the cart")
+        return []
+    if _tool_errored(res):
+        return []
+    payload = _search_payload(res) or {}
+    items = []
+    for entry in payload.get("items") or []:
+        sku, spin = entry.get("skuId"), entry.get("spinId")
+        if not sku or not spin:
+            continue
+        try:
+            qty = int(entry.get("quantity") or 1)
+        except (TypeError, ValueError):
+            qty = 1
+        items.append({"spinId": spin, "skuId": sku, "quantity": max(qty, 1)})
+    return items
+
+
+def _merge_cart_items(existing: list[dict], additions: list[dict]) -> list[dict]:
+    """Existing items first, new ones appended, deduplicated by skuId."""
+    merged = list(existing)
+    seen = {item["skuId"] for item in merged}
+    for item in additions:
+        if item["skuId"] in seen:
+            continue
+        merged.append(item)
+        seen.add(item["skuId"])
+    return merged
+
+
 async def _search_and_cart(
     queries: list[str], address_id: str, quantity: int
 ) -> tuple[list[dict], bool, str]:
@@ -161,6 +283,9 @@ async def _search_and_cart(
             cart_ok, cart_err = False, ""
             if items:
                 try:
+                    items = _merge_cart_items(
+                        await _existing_cart_items(session), items
+                    )
                     res = await session.call_tool(
                         "update_cart",
                         {"selectedAddressId": address_id, "items": items},

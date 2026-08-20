@@ -69,3 +69,113 @@ def test_cart_rejected_when_the_tool_errors():
 
 def test_cart_rejected_when_no_cart_body_comes_back():
     assert swiggy_search._cart_accepted(_result("Cart updated successfully.")) is False
+
+
+def test_merge_keeps_what_is_already_in_the_cart():
+    """update_cart REPLACES the cart, so adding item two without resending
+    item one silently deleted it. Confirmed live: adding Diet Coke removed
+    Monster Energy."""
+    existing = [{"spinId": "S1", "skuId": "MONSTER", "quantity": 1}]
+    additions = [{"spinId": "S2", "skuId": "COKE", "quantity": 1}]
+    merged = swiggy_search._merge_cart_items(existing, additions)
+    assert [i["skuId"] for i in merged] == ["MONSTER", "COKE"]
+
+
+def test_merge_does_not_duplicate_an_item_already_present():
+    existing = [{"spinId": "S1", "skuId": "MONSTER", "quantity": 2}]
+    additions = [{"spinId": "S1", "skuId": "MONSTER", "quantity": 1}]
+    merged = swiggy_search._merge_cart_items(existing, additions)
+    assert len(merged) == 1
+    assert merged[0]["quantity"] == 2
+
+
+def test_merge_into_an_empty_cart_is_just_the_additions():
+    additions = [{"spinId": "S2", "skuId": "COKE", "quantity": 1}]
+    assert swiggy_search._merge_cart_items([], additions) == additions
+
+
+def test_existing_items_are_read_from_the_cart_json_block():
+    cart = json.dumps({
+        "cartId": "C1",
+        "items": [
+            {"spinId": "S1", "skuId": "MONSTER", "quantity": 2, "itemName": "Monster"},
+            {"spinId": "S2", "skuId": "COKE", "quantity": 1, "itemName": "Diet Coke"},
+            {"itemName": "broken row without ids"},
+        ],
+    })
+
+    class FakeSession:
+        async def call_tool(self, name, args):
+            assert name == "get_cart"
+            return _result("Cart retrieved successfully.", cart)
+
+    import asyncio
+
+    items = asyncio.run(swiggy_search._existing_cart_items(FakeSession()))
+    assert items == [
+        {"spinId": "S1", "skuId": "MONSTER", "quantity": 2},
+        {"spinId": "S2", "skuId": "COKE", "quantity": 1},
+    ]
+
+
+def test_unreadable_cart_does_not_wipe_the_additions():
+    class FailingSession:
+        async def call_tool(self, name, args):
+            raise RuntimeError("get_cart down")
+
+    import asyncio
+
+    assert asyncio.run(swiggy_search._existing_cart_items(FailingSession())) == []
+
+
+import pytest
+
+
+@pytest.mark.parametrize("phrase,term,count", [
+    ("six pack of diet coke", "diet coke", 6),
+    ("diet coke 6 pack", "diet coke", 6),
+    ("one can of diet coke", "diet coke", 1),
+    ("2 litres of milk", "milk", 2),
+    ("two packets of butter", "butter", 2),
+    ("a can of coke", "coke", 1),
+    ("milk", "milk", None),
+])
+def test_pack_size_is_split_off_the_search_term(phrase, term, count):
+    """Sent verbatim, "six pack of diet coke" came back as Red Bull."""
+    assert swiggy_search._split_pack_size(phrase) == (term, count)
+
+
+@pytest.mark.parametrize("phrase", ["6 seed bread", "7up", "dozen eggs"])
+def test_numbers_that_belong_to_the_product_name_survive(phrase):
+    term, count = swiggy_search._split_pack_size(phrase)
+    assert term == phrase
+    assert count is None
+
+
+def _coke_product():
+    def variation(desc, price, sku):
+        return {
+            "skuId": sku, "spinId": "SP" + sku, "displayName": "Diet Coke Can",
+            "brandName": "Coca-Cola", "quantityDescription": desc,
+            "price": {"offerPrice": price}, "isInStockAndAvailable": True,
+        }
+    return {"displayName": "Diet Coke", "variations": [
+        variation("330 ml x 6", 259, "SIX"),
+        variation("330 ml x 4", 186, "FOUR"),
+        variation("330 ml", 50, "ONE"),
+    ]}
+
+
+def test_bare_request_takes_the_cheapest_pack():
+    result = _result(PROSE, json.dumps({"products": [_coke_product()]}))
+    assert swiggy_search._top_match("diet coke", result)["skuId"] == "ONE"
+
+
+def test_named_pack_size_wins_over_cheapest():
+    result = _result(PROSE, json.dumps({"products": [_coke_product()]}))
+    assert swiggy_search._top_match("six pack of diet coke", result, 6)["skuId"] == "SIX"
+
+
+def test_unavailable_pack_size_falls_back_to_cheapest():
+    result = _result(PROSE, json.dumps({"products": [_coke_product()]}))
+    assert swiggy_search._top_match("99 pack of diet coke", result, 99)["skuId"] == "ONE"
