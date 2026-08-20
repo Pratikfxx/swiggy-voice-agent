@@ -228,3 +228,13 @@ def test_remove_list_drops_only_the_named_products():
     keep, dropped = swiggy_search._partition_cart(CART_LINES, ["bread"], [])
     assert [d["skuId"] for d in dropped] == ["B"]
     assert [k["skuId"] for k in keep] == ["M", "D"]
+
+
+def test_refusal_payload_says_the_cart_is_untouched():
+    """The model read the old refusal and told the caller their cart was
+    empty, which was the opposite of the truth."""
+    import inspect
+
+    source = inspect.getsource(swiggy_search._remove_from_cart)
+    assert "cart_unchanged" in source
+    assert "Do NOT say the cart is empty" in source

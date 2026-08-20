@@ -418,11 +418,15 @@ async def _remove_from_cart(
             # emptied the cart. Refuse, and say what is actually in there.
             if keep_only and not keep:
                 return {
-                    "removed": [], "cart_updated": False,
-                    "cart_contents": [i.get("itemName") for i in lines],
+                    "cart_unchanged": True,
+                    "removed": [],
+                    "still_in_cart": [i.get("itemName") for i in lines],
                     "error": (
-                        "keep_only matched nothing in the cart, so nothing was "
-                        "removed. Use the product names listed in cart_contents."
+                        "NOTHING WAS REMOVED and the cart is NOT empty. The "
+                        "keep_only terms matched no product name — a category "
+                        "word like 'drinks' will not match. Tell the user the "
+                        "cart is unchanged, read out still_in_cart, and ask "
+                        "which of those to keep. Do NOT say the cart is empty."
                     ),
                 }
 
