@@ -91,6 +91,17 @@ SPEND_TOOLS = {
     "swiggy-instamart": ["checkout"],
     "swiggy-dineout": ["book_table"],
 }
+CART_EDIT_RULES = (
+    "\n\nCART EDITS: if the user removes, drops, cancels or changes their mind "
+    "about anything already in the cart, you MUST call remove_from_cart before "
+    "replying. Prefer its keep_only argument — name the items to KEEP. NEVER "
+    "state that the cart changed, and never quote a new total, unless a tool "
+    "call in THIS turn returned it: the cart lives on Swiggy's servers, not in "
+    "this conversation, and repeating an earlier total is how you tell the user "
+    "their groceries are gone when they are still there. After the tool returns, "
+    "read back what is left and the new subtotal it reports."
+)
+
 ADDRESS_SELECTION_RULES = (
     "IF the user names ANY delivery destination other than the default — an "
     "office, a label, a person's name, a locality — you MUST call get_addresses "
@@ -652,7 +663,7 @@ Show a cart summary table, total, ETA, then ask for confirmation.
 Respond in the same language the user writes in (English or Hindi).
 """
 
-LIVE_SYSTEM_SUFFIX = """
+_LIVE_SYSTEM_SUFFIX_BASE = """
 
 ## LIVE Swiggy mode
 You now have LIVE Swiggy Instamart tools. These tools use the user's real Swiggy account and can spend real money.
@@ -663,6 +674,9 @@ When fetching addresses, default to the address tagged Home or the most recently
 
 ADDRESS & SPEED RULES: Do NOT call get_addresses just to search - searching for food or products needs no address, so search immediately. Only resolve a delivery address when actually placing an order, and then default to the user's Home address (or most recently used) automatically. NEVER ask the user to choose an address unless they explicitly bring it up. On voice especially, keep it to one short question max before proposing an item.
 """
+
+LIVE_SYSTEM_SUFFIX = _LIVE_SYSTEM_SUFFIX_BASE + CART_EDIT_RULES
+
 
 
 def _block_value(block, key, default=None):

@@ -93,3 +93,20 @@ class AddressPromptTests(unittest.TestCase):
     def test_prompt_states_the_pagination_limit(self):
         agent = _fresh_agent()
         self.assertIn("10 most recently used", agent.ADDRESS_SELECTION_RULES)
+
+
+class CartEditPromptTests(unittest.TestCase):
+    """The agent said "Monster Energy Zero and Diet Coke, 205 rupees" after a
+    removal request without calling any tool. The cart still held all six
+    items. It had simply repeated its own earlier sentence."""
+
+    def test_prompt_requires_a_tool_call_before_claiming_a_cart_change(self):
+        agent = _fresh_agent()
+        rules = agent.CART_EDIT_RULES
+        self.assertIn("MUST call remove_from_cart", rules)
+        self.assertIn("keep_only", rules)
+        self.assertIn("in THIS turn", rules)
+
+    def test_cart_rules_reach_the_live_system_prompt(self):
+        agent = _fresh_agent()
+        self.assertIn("CART EDITS", agent.LIVE_SYSTEM_SUFFIX)
