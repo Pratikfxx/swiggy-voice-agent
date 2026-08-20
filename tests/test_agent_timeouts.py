@@ -394,3 +394,55 @@ class FastConfirmTests(unittest.TestCase):
             "not_found": [], "cart_updated": True, "subtotal": 504,
         })
         self.assertEqual(line, "")
+
+
+class TransientMcpRetryTests(unittest.TestCase):
+    """Anthropic reports "cannot reach Swiggy" as a 400, which is not retried
+    by the capacity path. It arrives in bursts and succeeds moments later."""
+
+    def _error(self, message, status=400):
+        import anthropic
+
+        response = type("R", (), {"status_code": status, "headers": {}, "request": None})()
+        exc = anthropic.APIStatusError(message, response=response, body=None)
+        exc.status_code = status
+        return exc
+
+    def test_connector_error_is_recognised_as_transient(self):
+        import agent
+
+        self.assertTrue(agent._is_transient_mcp_error(
+            self._error("Error code: 400 - Error while communicating with MCP server.")))
+        self.assertTrue(agent._is_transient_mcp_error(
+            self._error("MCP server returned an error while listing tools: Connection closed")))
+
+    def test_ordinary_bad_request_is_not_retried(self):
+        import agent
+
+        self.assertFalse(agent._is_transient_mcp_error(
+            self._error("Error code: 400 - messages.0: invalid role")))
+
+    def test_capacity_errors_stay_on_the_fallback_path(self):
+        import agent
+
+        self.assertFalse(agent._is_transient_mcp_error(self._error("overloaded", status=529)))
+        self.assertTrue(agent._is_capacity_error(self._error("overloaded", status=529)))
+
+    def test_a_transient_error_is_retried_once_on_the_same_model(self):
+        import agent
+
+        attempts = []
+
+        def flaky(model, **kwargs):
+            attempts.append(model)
+            if len(attempts) == 1:
+                raise self._error("Error while communicating with MCP server.")
+            return "ok"
+
+        with patch.object(agent, "_model_for", return_value="claude-haiku-4-5"), \
+             patch.object(agent.client.beta, "messages") as beta:
+            beta.create.side_effect = lambda model, **kw: flaky(model, **kw)
+            result = agent._create_message("voice", True, messages=[], max_tokens=10)
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(attempts, ["claude-haiku-4-5", "claude-haiku-4-5"])

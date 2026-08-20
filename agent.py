@@ -827,6 +827,25 @@ def _is_capacity_error(exc: Exception) -> bool:
     return status == 429 or (isinstance(status, int) and status >= 500)
 
 
+# Anthropic reports a failure to reach Swiggy's MCP server as a 400
+# invalid_request_error, which looks like a bad request but is transient — it
+# arrives in bursts and the identical call succeeds moments later. Retrying
+# turned an on-call "Sorry, I hit a problem reaching Swiggy" into a normal
+# answer.
+_MCP_TRANSIENT_MARKERS = (
+    "error while communicating with mcp server",
+    "mcp server returned an error while listing tools",
+    "connection closed",
+)
+
+
+def _is_transient_mcp_error(exc: Exception) -> bool:
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _MCP_TRANSIENT_MARKERS)
+
+
 def _create_message(surface: str, live: bool, **kwargs):
     """Create a message on the surface's model, falling back on capacity errors.
 
@@ -841,6 +860,13 @@ def _create_message(surface: str, live: bool, **kwargs):
     try:
         return attempt(primary)
     except anthropic.APIStatusError as exc:
+        if _is_transient_mcp_error(exc):
+            # Same model, same request: the connector, not the model, blinked.
+            logging.warning("transient Swiggy MCP connector error; retrying once")
+            try:
+                return attempt(primary)
+            except anthropic.APIStatusError:
+                raise
         fallback = _overload_fallback_for(surface)
         if not fallback or fallback == primary or not _is_capacity_error(exc):
             raise
