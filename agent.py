@@ -167,6 +167,10 @@ LIVE_AUTH_NOT_READY_MESSAGE = (
     "Swiggy login is not ready for Instamart yet. "
     "Please refresh the Instamart login and try again."
 )
+LIVE_LINK_REQUIRED_MESSAGE = (
+    "Please link your own Swiggy account first. Open WhatsApp, message this "
+    "assistant with the word link, and follow the secure sign-in URL."
+)
 LIVE_CHECKOUT_UNCERTAIN_MESSAGE = (
     "I couldn't confirm the checkout status. "
     "Please check your Swiggy app order history before trying again."
@@ -1461,11 +1465,16 @@ def run_agent(
         tokens = get_access_tokens(ACTIVE_TOKEN_KEYS, user_id=user_id)
     except Exception as e:
         logging.warning("Swiggy live auth not ready: %s", e)
+        message = (
+            LIVE_LINK_REQUIRED_MESSAGE
+            if "link your swiggy account" in str(e).lower()
+            else LIVE_AUTH_NOT_READY_MESSAGE
+        )
         messages = conversation_history + [
             {"role": "user", "content": user_message},
-            {"role": "assistant", "content": LIVE_AUTH_NOT_READY_MESSAGE},
+            {"role": "assistant", "content": message},
         ]
-        return _agent_result(LIVE_AUTH_NOT_READY_MESSAGE, messages, return_meta=return_meta)
+        return _agent_result(message, messages, return_meta=return_meta)
 
     return _run_agent_live(
         user_message,

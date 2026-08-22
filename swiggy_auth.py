@@ -59,6 +59,12 @@ def _validate_key(key: str) -> None:
         raise ValueError(f"Unknown Swiggy MCP key {key!r}; expected one of: {valid}")
 
 
+def _env_token_allowed(user_id: str | None) -> bool:
+    owner = os.getenv("SWIGGY_ENV_TOKEN_USER_ID", "").removeprefix("whatsapp:")
+    caller = str(user_id or "").removeprefix("whatsapp:")
+    return not owner or not caller or caller == owner
+
+
 def _generate_pkce() -> tuple[str, str]:
     verifier = secrets.token_urlsafe(48)
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
@@ -271,6 +277,8 @@ def get_access_token(key: str, user_id: str | None = None) -> str:
     record = user_record
 
     if not record:
+        if not _env_token_allowed(user_id):
+            raise RuntimeError("Please link your Swiggy account before ordering.")
         env_token = os.environ.get(ENV_TOKEN_VARS[key])
         if env_token:
             return env_token

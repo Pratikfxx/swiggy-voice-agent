@@ -60,6 +60,17 @@ def test_missing_user_token_falls_back_to_env_and_no_user_behavior_is_unchanged(
     assert swiggy_auth.get_access_tokens(("im",), user_id=None) == {"im": "env-token"}
 
 
+def test_env_token_is_only_available_to_the_configured_owner(monkeypatch, tmp_path):
+    _prepare_user_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("SWIGGY_IM_TOKEN", "env-token")
+    monkeypatch.setenv("SWIGGY_ENV_TOKEN_USER_ID", "+918459710806")
+
+    assert swiggy_auth.get_access_token("im", user_id="whatsapp:+918459710806") == "env-token"
+    assert swiggy_auth.get_access_token("im", user_id=None) == "env-token"
+    with pytest.raises(RuntimeError, match="link.*Swiggy account"):
+        swiggy_auth.get_access_token("im", user_id="+919999999999")
+
+
 def test_user_token_store_failure_falls_back_to_env(monkeypatch, tmp_path):
     _prepare_user_store(monkeypatch, tmp_path)
     monkeypatch.setenv("SWIGGY_IM_TOKEN", "env-token")

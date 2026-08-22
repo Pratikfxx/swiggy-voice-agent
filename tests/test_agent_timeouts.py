@@ -18,6 +18,21 @@ def _fresh_agent():
 
 
 class AgentTimeoutTests(unittest.TestCase):
+    def test_unlinked_user_is_told_how_to_link_instead_of_refreshing_the_owner_token(self):
+        agent = _fresh_agent()
+        with patch.object(
+            agent,
+            "get_access_tokens",
+            side_effect=RuntimeError("Please link your Swiggy account before ordering."),
+        ):
+            response, _ = agent.run_agent(
+                "get milk", [], surface="voice", session_id="call", user_id="+91999"
+            )
+
+        self.assertIn("WhatsApp", response)
+        self.assertIn("link", response.lower())
+        self.assertNotIn("refresh", response.lower())
+
     def test_live_spend_result_reports_order_metadata_without_prose_completion(self):
         agent = _fresh_agent()
 

@@ -27,6 +27,8 @@ services:
         sync: false
       - key: SWIGGY_DINEOUT_TOKEN
         sync: false
+      - key: SWIGGY_ENV_TOKEN_USER_ID
+        sync: false
       - key: SWIGGY_FOOD_TOKEN
         sync: false
       - key: SWIGGY_IM_TOKEN
