@@ -1,4 +1,5 @@
 import asyncio
+from collections import OrderedDict
 import json
 import logging
 import os
@@ -19,9 +20,14 @@ ADDRESS_URL = SWIGGY_SERVER_URLS[_ADDRESS_SERVER]
 ADDRESS_TOKEN_KEY = SERVER_AUTH_KEYS[_ADDRESS_SERVER]
 TTL = int(os.getenv("DEFAULT_ADDR_TTL", "600"))
 
-_cache = {"addr": None, "ts": 0.0}
+_CACHE_MAX = 1000
+_cache: OrderedDict[str, dict] = OrderedDict()
 _lock = threading.Lock()
-_refreshing = False
+_refreshing: set[str] = set()
+
+
+def _cache_key(user_id: str) -> str:
+    return user_id or "__default__"
 
 
 def _get_field(obj, key, default=None):
@@ -74,9 +80,9 @@ def _parse_addresses_result(result) -> dict | None:
     }
 
 
-async def fetch_default_address() -> dict | None:
+async def fetch_default_address(user_id: str = "") -> dict | None:
     try:
-        token = get_access_token(ADDRESS_TOKEN_KEY)
+        token = get_access_token(ADDRESS_TOKEN_KEY, user_id=user_id)
         async with open_authenticated_mcp(ADDRESS_URL, token) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
@@ -87,22 +93,26 @@ async def fetch_default_address() -> dict | None:
         return None
 
 
-def get_cached_default() -> dict | None:
+def get_cached_default(user_id: str = "") -> dict | None:
     with _lock:
-        return _cache["addr"]
+        entry = _cache.get(_cache_key(user_id))
+        return entry["addr"] if entry else None
 
 
-async def refresh_default_address() -> dict | None:
-    addr = await fetch_default_address()
+async def refresh_default_address(user_id: str = "") -> dict | None:
+    addr = await fetch_default_address(user_id)
     if addr:
         with _lock:
-            _cache["addr"] = addr
-            _cache["ts"] = time.time()
+            key = _cache_key(user_id)
+            _cache.pop(key, None)
+            _cache[key] = {"addr": addr, "ts": time.time()}
+            while len(_cache) > _CACHE_MAX:
+                _cache.popitem(last=False)
         logging.info("default address refreshed: %s (%s)", addr.get("label"), addr.get("id"))
     return addr
 
 
-def get_default_blocking(timeout: float = 4.0) -> dict | None:
+def get_default_blocking(user_id: str = "", timeout: float = 4.0) -> dict | None:
     """Cached default address, fetching synchronously if the cache is cold.
 
     Cold cache means the system prompt carries no address, and the model burns
@@ -111,36 +121,35 @@ def get_default_blocking(timeout: float = 4.0) -> dict | None:
     cheaper than that turn. Runs in the agent's worker thread, so a fresh
     event loop via asyncio.run is safe here.
     """
-    addr = get_cached_default()
+    addr = get_cached_default(user_id)
     if addr:
         return addr
     try:
-        return asyncio.run(asyncio.wait_for(refresh_default_address(), timeout))
+        return asyncio.run(asyncio.wait_for(refresh_default_address(user_id), timeout))
     except Exception:
         logging.exception("blocking address fetch failed")
         return None
 
 
-def maybe_background_refresh() -> None:
-    global _refreshing
+def maybe_background_refresh(user_id: str = "") -> None:
+    key = _cache_key(user_id)
     try:
         with _lock:
-            ts = _cache["ts"]
-            if _refreshing:
+            entry = _cache.get(key) or {"addr": None, "ts": 0.0}
+            if key in _refreshing:
                 return
-            if _cache["addr"] is not None and (time.time() - ts) < TTL:
+            if entry["addr"] is not None and (time.time() - entry["ts"]) < TTL:
                 return
-            _refreshing = True
+            _refreshing.add(key)
 
         def _worker():
-            global _refreshing
             try:
-                asyncio.run(refresh_default_address())
+                asyncio.run(refresh_default_address(user_id))
             except Exception:
                 logging.exception("bg address refresh failed")
             finally:
                 with _lock:
-                    _refreshing = False
+                    _refreshing.discard(key)
 
         threading.Thread(target=_worker, daemon=True).start()
     except Exception:

@@ -206,22 +206,6 @@ async def _search_one(session: ClientSession, query: str, address_id: str) -> di
         return {"query": query, "found": False}
 
 
-async def _batch(queries: list[str], address_id: str) -> list[dict]:
-    """One MCP connection, all searches multiplexed over it concurrently.
-
-    Opening a separate streamablehttp connection per query and gathering them
-    trips anyio task-group cleanup (especially inside a worker thread's loop).
-    A single session multiplexes JSON-RPC requests by id, so the calls still run
-    concurrently without N connections.
-    """
-    token = get_access_token(_IM_TOKEN_KEY)
-    async with open_authenticated_mcp(_IM_URL, token) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tasks = [_search_one(session, q, address_id) for q in queries]
-            return await asyncio.gather(*tasks)
-
-
 def _first_text(result) -> str:
     for block in (getattr(result, "content", None) or []):
         t = getattr(block, "text", None)
@@ -295,9 +279,9 @@ def _merge_cart_items(existing: list[dict], additions: list[dict]) -> list[dict]
 
 
 async def _search_and_cart(
-    queries: list[str], address_id: str, quantity: int
+    queries: list[str], address_id: str, quantity: int, user_id: str = ""
 ) -> tuple[list[dict], bool, str]:
-    token = get_access_token(_IM_TOKEN_KEY)
+    token = get_access_token(_IM_TOKEN_KEY, user_id=user_id)
     async with open_authenticated_mcp(_IM_URL, token) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -339,7 +323,7 @@ async def _search_and_cart(
 
 
 def search_and_add_to_cart(
-    queries: list[str], address_id: str, quantity: int = 1
+    queries: list[str], address_id: str, quantity: int = 1, user_id: str = ""
 ) -> dict:
     """Search many Instamart items in parallel AND add the best match of each to
     the cart in one deterministic step. Runs in a worker thread, so asyncio.run
@@ -357,7 +341,7 @@ def search_and_add_to_cart(
         qty = 1
 
     found, cart_ok, cart_err, cart_lines, cart_total = asyncio.run(
-        _search_and_cart(cleaned, address_id, qty)
+        _search_and_cart(cleaned, address_id, qty, user_id)
     )
     added = [
         {
@@ -421,8 +405,8 @@ def _cart_checkout_summary(payload: dict) -> dict:
     }
 
 
-async def _get_cart_summary() -> dict:
-    token = get_access_token(_IM_TOKEN_KEY)
+async def _get_cart_summary(user_id: str = "") -> dict:
+    token = get_access_token(_IM_TOKEN_KEY, user_id=user_id)
     async with open_authenticated_mcp(_IM_URL, token) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -433,8 +417,8 @@ async def _get_cart_summary() -> dict:
             return _cart_checkout_summary(payload) if payload else {"error": "cart unavailable"}
 
 
-def get_cart_summary() -> dict:
-    return asyncio.run(_get_cart_summary())
+def get_cart_summary(user_id: str = "") -> dict:
+    return asyncio.run(_get_cart_summary(user_id))
 
 
 def _matches(name: str, term: str) -> bool:
@@ -469,7 +453,7 @@ def _partition_cart(
 
 
 async def _remove_from_cart(
-    remove: list[str], keep_only: list[str], address_id: str
+    remove: list[str], keep_only: list[str], address_id: str, user_id: str = ""
 ) -> dict:
     """Drop or retain cart lines by name, then write the cart back.
 
@@ -483,7 +467,7 @@ async def _remove_from_cart(
     if not remove and not keep_only:
         return {"error": "name the items to remove, or the items to keep"}
 
-    token = get_access_token(_IM_TOKEN_KEY)
+    token = get_access_token(_IM_TOKEN_KEY, user_id=user_id)
     async with open_authenticated_mcp(_IM_URL, token) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -555,8 +539,11 @@ def remove_from_cart(
     address_id: str,
     remove: list[str] | None = None,
     keep_only: list[str] | None = None,
+    user_id: str = "",
 ) -> dict:
     """Sync wrapper. Runs in a worker thread, so asyncio.run is safe here."""
     if not address_id:
         return {"error": "address_id is required"}
-    return asyncio.run(_remove_from_cart(remove or [], keep_only or [], address_id))
+    return asyncio.run(
+        _remove_from_cart(remove or [], keep_only or [], address_id, user_id)
+    )

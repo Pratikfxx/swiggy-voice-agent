@@ -510,6 +510,7 @@ def execute_tool(
                 tool_input["address_id"],
                 remove=tool_input.get("remove"),
                 keep_only=tool_input.get("keep_only"),
+                user_id=user_id,
             )
 
         elif tool_name == "search_and_add_to_cart":
@@ -517,6 +518,7 @@ def execute_tool(
                 tool_input["queries"],
                 tool_input["address_id"],
                 tool_input.get("quantity", 1),
+                user_id=user_id,
             )
 
         elif tool_name == "search_grocery_product":
@@ -1281,14 +1283,14 @@ def _run_agent_live(
         system_prompt = (
             VOICE_SYSTEM_PROMPT if surface == "voice" else CHAT_SYSTEM_PROMPT
         ) + LIVE_SYSTEM_SUFFIX + _payment_rules_for_surface(surface)
-        default_address = swiggy_address.get_cached_default()
+        default_address = swiggy_address.get_cached_default(user_id)
         if default_address:
             # warm cache: refresh in the background if the TTL lapsed
-            swiggy_address.maybe_background_refresh()
+            swiggy_address.maybe_background_refresh(user_id)
         else:
             # cold cache (first call after deploy): fetch now, or the model
             # burns the caller's first turn asking which address to use
-            default_address = swiggy_address.get_default_blocking()
+            default_address = swiggy_address.get_default_blocking(user_id)
         if default_address:
             addr_id = default_address["id"]
             addr_label = default_address["label"]
@@ -1301,7 +1303,7 @@ def _run_agent_live(
             addr_id = ""
 
         if selection_accepted and surface == "voice":
-            line = _final_checkout_line(get_cart_summary())
+            line = _final_checkout_line(get_cart_summary(user_id=user_id))
             if line:
                 messages.append({"role": "assistant", "content": line})
                 return _agent_result(line, messages, False, return_meta)
