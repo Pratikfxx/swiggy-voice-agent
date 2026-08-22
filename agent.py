@@ -22,7 +22,7 @@ from recipe_engine import get_recipe_ingredients as _get_recipe_ingredients
 from order_history import save_order, get_recent_orders
 import store
 import swiggy_address
-from swiggy_search import remove_from_cart, search_and_add_to_cart
+from swiggy_search import get_cart_summary, remove_from_cart, search_and_add_to_cart
 from swiggy_auth import get_access_tokens
 from swiggy_scope import (
     demo_mode,
@@ -801,6 +801,32 @@ def _checkout_ready(user_message: str, history: list[dict], surface: str) -> boo
     return has_total and has_address and has_payment and asks_to_place
 
 
+def _selection_accepted(user_message: str, history: list[dict]) -> bool:
+    if not _is_confirmation(user_message) or _ORDER_CHANGE_RE.search(user_message or ""):
+        return False
+    for message in reversed(history):
+        if message.get("role") == "assistant":
+            return _content_text(message.get("content")).rstrip().endswith("Keep these?")
+    return False
+
+
+def _final_checkout_line(summary: dict) -> str:
+    total = str(summary.get("cart_total") or "")
+    total = re.sub(r"[^\d.]", "", total)
+    address = str(summary.get("address") or "").strip()
+    if not total or not address or not summary.get("items"):
+        return ""
+    stores = int(summary.get("store_count") or 0)
+    multi_store = (
+        f" across {stores} stores; Instamart will place separate orders"
+        if stores > 1 else ""
+    )
+    return (
+        f"Full cart is {total} rupees{multi_store}, delivered to {address}, "
+        "cash on delivery. Place the order?"
+    )
+
+
 def checkout_confirmation_pending(
     session_id: str, user_message: str, surface: str = "voice"
 ) -> bool:
@@ -904,7 +930,7 @@ def _fast_confirm_line(tool_name: str, raw_result: str, user_message: str) -> st
     except (TypeError, ValueError):
         return ""
 
-    return f"{listed}, {rupees} rupees. Confirm?"
+    return f"{listed}, {rupees} rupees. Keep these?"
 
 
 def _spend_server_for_tool(tool_name: str) -> str:
@@ -1249,6 +1275,7 @@ def _run_agent_live(
     order_placed = False
     user_id = user_id or session_id
     checkout_enabled = _checkout_ready(user_message, conversation_history, surface)
+    selection_accepted = _selection_accepted(user_message, conversation_history)
 
     try:
         system_prompt = (
@@ -1272,6 +1299,12 @@ def _run_agent_live(
             addr_area = DEFAULT_ADDRESS_AREA
         else:
             addr_id = ""
+
+        if selection_accepted and surface == "voice":
+            line = _final_checkout_line(get_cart_summary())
+            if line:
+                messages.append({"role": "assistant", "content": line})
+                return _agent_result(line, messages, False, return_meta)
 
         if addr_id:
             system_prompt += (

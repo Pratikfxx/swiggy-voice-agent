@@ -239,6 +239,28 @@ def test_query_word_does_not_match_inside_an_unrelated_word():
     assert swiggy_search._top_match("oil", result)["skuId"] == "OIL"
 
 
+def test_cart_checkout_summary_uses_swiggys_total_and_selected_address():
+    summary = swiggy_search._cart_checkout_summary({
+        "cartTotalAmount": "₹171",
+        "selectedAddressDetails": {
+            "annotation": "Ghar",
+            "area": "Sattelite Gardens",
+            "id": "A1",
+        },
+        "items": [
+            {"itemName": "Diet Coke", "itemVariant": "330 ml", "quantity": 1, "storeId": "S1"},
+            {"itemName": "Monster Zero", "itemVariant": "350 ml", "quantity": 1, "storeId": "S1"},
+        ],
+    })
+    assert summary == {
+        "cart_total": "₹171",
+        "address": "Ghar",
+        "address_id": "A1",
+        "items": ["Diet Coke 330 ml", "Monster Zero 350 ml"],
+        "store_count": 1,
+    }
+
+
 def test_keep_list_matches_the_right_lines():
     """Dropping by "sugar" also removed "Monster Energy Zero Sugar", which is
     why the tool prefers naming what to keep."""

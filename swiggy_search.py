@@ -403,6 +403,40 @@ def _cart_summary(items: list[dict]) -> dict:
     }
 
 
+def _cart_checkout_summary(payload: dict) -> dict:
+    address = payload.get("selectedAddressDetails") or {}
+    items = payload.get("items") or []
+    names = []
+    for item in items:
+        name = str(item.get("itemName") or "").strip()
+        variant = str(item.get("itemVariant") or "").strip()
+        names.append(" ".join(part for part in (name, variant) if part))
+    stores = {item.get("storeId") for item in items if item.get("storeId")}
+    return {
+        "cart_total": payload.get("cartTotalAmount"),
+        "address": address.get("annotation") or address.get("area") or address.get("address"),
+        "address_id": address.get("id") or payload.get("selectedAddress"),
+        "items": names,
+        "store_count": len(stores),
+    }
+
+
+async def _get_cart_summary() -> dict:
+    token = get_access_token(_IM_TOKEN_KEY)
+    async with open_authenticated_mcp(_IM_URL, token) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool("get_cart", {})
+            if _tool_errored(result):
+                return {"error": _first_text(result)[:200]}
+            payload = _search_payload(result)
+            return _cart_checkout_summary(payload) if payload else {"error": "cart unavailable"}
+
+
+def get_cart_summary() -> dict:
+    return asyncio.run(_get_cart_summary())
+
+
 def _matches(name: str, term: str) -> bool:
     """Whole-word match of a caller's term against a catalogue name.
 

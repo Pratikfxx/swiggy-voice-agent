@@ -438,11 +438,11 @@ class FastConfirmTests(unittest.TestCase):
             "added": [{"item": "milk"}, {"item": "bread"}, {"item": "eggs"}],
             "not_found": [], "cart_updated": True, "subtotal": 319,
         })
-        self.assertEqual(line, "milk, bread and eggs, 319 rupees. Confirm?")
+        self.assertEqual(line, "milk, bread and eggs, 319 rupees. Keep these?")
 
     def test_single_item_reads_naturally(self):
         line = self._line({"added": [{"item": "milk"}], "not_found": [], "cart_updated": True, "subtotal": 59})
-        self.assertEqual(line, "milk, 59 rupees. Confirm?")
+        self.assertEqual(line, "milk, 59 rupees. Keep these?")
 
     def test_missing_items_fall_through_to_the_model(self):
         self.assertEqual(self._line({
@@ -486,7 +486,7 @@ class FastConfirmTests(unittest.TestCase):
             "subtotal": 77, "cart_total": 79,
             "cart_has_other_items": False,
         })
-        self.assertEqual(line, "milk and bread, 79 rupees. Confirm?")
+        self.assertEqual(line, "milk and bread, 79 rupees. Keep these?")
 
     def test_a_formatted_rupee_total_is_still_spoken(self):
         """cart_total comes back as "\u20b979", not 79, and the float() on it
@@ -497,7 +497,7 @@ class FastConfirmTests(unittest.TestCase):
             "subtotal": 77, "cart_total": "\u20b979",
             "cart_has_other_items": False,
         })
-        self.assertEqual(line, "milk and bread, 79 rupees. Confirm?")
+        self.assertEqual(line, "milk and bread, 79 rupees. Keep these?")
 
     def test_other_tools_are_never_short_circuited(self):
         import agent
@@ -525,7 +525,7 @@ class FastConfirmTests(unittest.TestCase):
         })
         self.assertEqual(
             line,
-            "Mother Dairy milk 500 ml and NOICE bread 250 g, 79 rupees. Confirm?",
+            "Mother Dairy milk 500 ml and NOICE bread 250 g, 79 rupees. Keep these?",
         )
         self.assertNotIn("Pasteurised", line)
 
@@ -536,6 +536,31 @@ class FastConfirmTests(unittest.TestCase):
         })
         self.assertEqual(line, "")
 
+
+def test_fast_selection_yes_is_a_distinct_non_spending_transition():
+    import agent
+
+    history = [{
+        "role": "assistant",
+        "content": "Diet Coke 330 ml and Monster Zero 350 ml, 171 rupees. Keep these?",
+    }]
+    assert agent._selection_accepted("yes", history) is True
+    assert agent._selection_accepted("yes, remove diet coke", history) is False
+    assert agent._selection_accepted("yes", [{"role": "assistant", "content": "Confirm?"}]) is False
+
+
+def test_final_checkout_line_uses_real_cart_address_and_total():
+    import agent
+
+    line = agent._final_checkout_line({
+        "cart_total": "₹171",
+        "address": "Ghar",
+        "items": ["Diet Coke", "Monster Energy Zero"],
+    })
+    assert line == (
+        "Full cart is 171 rupees, delivered to Ghar, cash on delivery. "
+        "Place the order?"
+    )
 
 class TransientMcpRetryTests(unittest.TestCase):
     """Anthropic reports "cannot reach Swiggy" as a 400, which is not retried
