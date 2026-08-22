@@ -56,6 +56,7 @@ class InstamartOnlyTests(unittest.IsolatedAsyncioTestCase):
         prompt = agent.VOICE_SYSTEM_PROMPT
         self.assertIn("final cart, address, and payment summary", prompt)
         self.assertNotIn("On yes → checkout", prompt)
+        self.assertIn("call get_cart, not search again", prompt)
 
     def test_chat_prompt_is_instamart_only(self):
         agent = _fresh_agent()
