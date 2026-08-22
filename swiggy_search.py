@@ -107,6 +107,35 @@ def _products_of(payload: dict) -> list:
     return (payload.get("data") or {}).get("products") or []
 
 
+def _best_product(query: str, products: list[dict]) -> list[dict]:
+    """Relevant single product first; otherwise preserve Swiggy's order."""
+    search_term, _ = _split_pack_size(query)
+    words = set(re.findall(r"[a-z0-9]+", search_term.lower()))
+
+    def score(product):
+        name = str(product.get("displayName") or "").lower()
+        name_words = re.findall(r"[a-z0-9]+", name)
+        matched = sum(
+            any(word == candidate or word.rstrip("s") == candidate.rstrip("s")
+                for candidate in name_words)
+            for word in words
+        )
+        is_combo = "," in name or "combo" in name
+        available = any(
+            variation.get("isInStockAndAvailable", True)
+            for variation in product.get("variations", [])
+        )
+        # For a multi-word query, prefer the tighter matching title. For a
+        # generic one-word query such as "bread", preserve Swiggy's ranking.
+        specificity = -len(name_words) if len(words) > 1 else 0
+        return available, matched == len(words), matched, not is_combo, specificity
+
+    if not products:
+        return []
+    best = max(range(len(products)), key=lambda index: score(products[index]))
+    return [products[best], *products[:best], *products[best + 1:]]
+
+
 def _top_match(query: str, result, pack_size: int | None = None) -> dict:
     """Reduce a search_products result to the single best buyable variation."""
     payload = _search_payload(result)
@@ -114,7 +143,7 @@ def _top_match(query: str, result, pack_size: int | None = None) -> dict:
         logging.warning("search_products returned no JSON block for %r", query)
         return {"query": query, "found": False}
 
-    products = _products_of(payload)
+    products = _best_product(query, _products_of(payload))
     for product in products:
         # Swiggy lists a product's variations largest-pack-first, so taking the
         # first one put a six-pack of Diet Coke (Rs259) in the cart when the
@@ -334,6 +363,8 @@ def search_and_add_to_cart(
         {
             "item": f["query"],
             "name": f.get("name"),
+            "brand": f.get("brand"),
+            "variant": f.get("quantity"),
             "quantity": qty,
             "price": f.get("price"),
         }

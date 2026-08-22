@@ -51,6 +51,12 @@ class InstamartOnlyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("pick clear top matches", prompt)
         self.assertIn("Add these?", prompt)
 
+    def test_voice_prompt_does_not_checkout_on_the_first_yes(self):
+        agent = _fresh_agent()
+        prompt = agent.VOICE_SYSTEM_PROMPT
+        self.assertIn("final cart, address, and payment summary", prompt)
+        self.assertNotIn("On yes → checkout", prompt)
+
     def test_chat_prompt_is_instamart_only(self):
         agent = _fresh_agent()
         prompt = agent.CHAT_SYSTEM_PROMPT
@@ -59,6 +65,11 @@ class InstamartOnlyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("book a table", prompt.lower())
         self.assertNotIn("dineout", prompt.lower())
         self.assertNotIn("restaurant options", prompt.lower())
+
+    def test_live_repeat_order_prompt_names_the_authoritative_tool(self):
+        agent = _fresh_agent()
+        for prompt in (agent.VOICE_SYSTEM_PROMPT, agent.CHAT_SYSTEM_PROMPT):
+            self.assertIn("get_orders", prompt)
 
     async def test_voice_greeting_names_instamart(self):
         voice_handler = _fresh_voice_handler()
@@ -90,9 +101,10 @@ class AddressPromptTests(unittest.TestCase):
         self.assertIn("MUST call get_addresses", rules)
         self.assertIn("NEVER say an address is not saved", rules)
 
-    def test_prompt_states_the_pagination_limit(self):
+    def test_prompt_paginates_until_the_named_address_is_found(self):
         agent = _fresh_agent()
-        self.assertIn("10 most recently used", agent.ADDRESS_SELECTION_RULES)
+        self.assertIn("page=2", agent.ADDRESS_SELECTION_RULES)
+        self.assertNotIn("takes no page argument", agent.ADDRESS_SELECTION_RULES)
 
 
 class CartEditPromptTests(unittest.TestCase):
@@ -120,7 +132,7 @@ class OrderPlacementPromptTests(unittest.TestCase):
 
     def test_payment_method_is_specified_for_voice(self):
         agent = _fresh_agent()
-        rules = agent.ORDER_PLACEMENT_RULES
+        rules = agent._payment_rules_for_surface("voice")
         self.assertIn("paymentMethod", rules)
         self.assertIn("Cash", rules)
 
@@ -154,3 +166,13 @@ class OrderPlacementPromptTests(unittest.TestCase):
     def test_success_wording_follows_swiggy_branding(self):
         agent = _fresh_agent()
         self.assertIn("Instamart order placed successfully", agent.VOICE_SYSTEM_PROMPT)
+
+    def test_voice_and_chat_have_different_payment_rules(self):
+        agent = _fresh_agent()
+        self.assertIn("cash on delivery", agent._payment_rules_for_surface("voice").lower())
+        self.assertIn("get_payment_options", agent._payment_rules_for_surface("chat"))
+        self.assertNotIn("Use cash on delivery", agent._payment_rules_for_surface("chat"))
+
+    def test_live_mode_uses_swiggys_order_history_not_the_local_copy(self):
+        agent = _fresh_agent()
+        self.assertNotIn("get_order_history", agent.LOCAL_NAMES)

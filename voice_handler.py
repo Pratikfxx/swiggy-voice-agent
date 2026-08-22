@@ -27,7 +27,15 @@ from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse, Gather, Say, Play, Hangup
 from dotenv import load_dotenv
 
-from agent import CONFIRM_RE, DEMO_MODE, normalize_user_id, process_message, clear_session
+from agent import (
+    CONFIRM_RE,
+    DEMO_MODE,
+    LIVE_CHECKOUT_UNCERTAIN_MESSAGE,
+    checkout_confirmation_pending,
+    normalize_user_id,
+    process_message,
+    clear_session,
+)
 from order_history import get_recent_orders
 from twilio_security import verify_twilio_request
 
@@ -169,10 +177,11 @@ DEFAULT_GATHER_TIMEOUT = 7
 # VOICE_API_TIMEOUT_SECS (20s) or it kills the API call before it can answer,
 # and below the ~24s the /voice/result poll loop can keep the caller held.
 VOICE_AGENT_TIMEOUT_SECS = float(os.getenv("VOICE_AGENT_TIMEOUT_SECS", "22.0"))
+VOICE_CHECKOUT_TIMEOUT_SECS = float(os.getenv("VOICE_CHECKOUT_TIMEOUT_SECS", "60.0"))
 # Must cover VOICE_AGENT_TIMEOUT_SECS even if each poll is only ~2s of audio,
 # otherwise the caller hears "taking longer" while the answer is still coming.
 # Extra polls cost nothing: the loop exits as soon as the result lands.
-VOICE_RESULT_MAX_POLLS = int(os.getenv("VOICE_RESULT_MAX_POLLS", "12"))
+VOICE_RESULT_MAX_POLLS = int(os.getenv("VOICE_RESULT_MAX_POLLS", "32"))
 # The agent now batch-searches multiple items in parallel (~one search's time),
 # so a normal grocery list no longer risks the voice deadline. Only trip the
 # one-at-a-time guard for long lists; smaller ones go straight to the agent.
@@ -188,8 +197,20 @@ _VOICE_MULTI_ITEM_GUARD = int(os.getenv("VOICE_MULTI_ITEM_GUARD", "12"))
 # "sparse" leaves ~9 second gaps. Switchable without a deploy so the cadence
 # can be judged by ear on a real call.
 _VOICE_WAIT_CADENCES = {
-    "frequent": {3: "Still checking Instamart.", 6: "Almost there.", 9: "Nearly done."},
-    "sparse": {4: "Still checking Instamart.", 8: "Almost there."},
+    "frequent": {
+        3: "Still checking Instamart.",
+        6: "Almost there.",
+        9: "Nearly done.",
+        15: "Still confirming with Instamart.",
+        21: "Almost finished.",
+        27: "One more moment.",
+    },
+    "sparse": {
+        4: "Still checking Instamart.",
+        8: "Almost there.",
+        16: "Still confirming with Instamart.",
+        24: "One more moment.",
+    },
 }
 _VOICE_WAIT_LINES = _VOICE_WAIT_CADENCES.get(
     os.getenv("VOICE_WAIT_CADENCE", "frequent"), _VOICE_WAIT_CADENCES["frequent"]
@@ -387,6 +408,10 @@ async def run_voice_agent_with_deadline(
 ):
     start = time.monotonic()
     user_id = user_id or _voice_user_ids.get(call_sid, call_sid)
+    checkout_pending = checkout_confirmation_pending(call_sid, speech_result, "voice")
+    timeout_secs = (
+        VOICE_CHECKOUT_TIMEOUT_SECS if checkout_pending else VOICE_AGENT_TIMEOUT_SECS
+    )
     try:
         agent_result = await asyncio.wait_for(
             asyncio.to_thread(
@@ -397,7 +422,7 @@ async def run_voice_agent_with_deadline(
                 return_meta=return_meta,
                 user_id=user_id,
             ),
-            timeout=VOICE_AGENT_TIMEOUT_SECS,
+            timeout=timeout_secs,
         )
     except asyncio.TimeoutError:
         elapsed = time.monotonic() - start
@@ -407,9 +432,14 @@ async def run_voice_agent_with_deadline(
             elapsed,
             speech_result,
         )
+        message = (
+            LIVE_CHECKOUT_UNCERTAIN_MESSAGE
+            if checkout_pending
+            else VOICE_AGENT_TIMEOUT_MESSAGE
+        )
         if return_meta:
-            return VOICE_AGENT_TIMEOUT_MESSAGE, elapsed, True, {"order_placed": False}
-        return VOICE_AGENT_TIMEOUT_MESSAGE, elapsed, True
+            return message, elapsed, True, {"order_placed": False}
+        return message, elapsed, True
 
     elapsed = time.monotonic() - start
     if not return_meta:

@@ -33,6 +33,10 @@ class AgentTimeoutTests(unittest.TestCase):
                     "type": "mcp_tool_result",
                     "tool_use_id": "checkout-1",
                     "is_error": False,
+                    "content": [{
+                        "type": "text",
+                        "text": "Instamart order placed successfully. Arriving in 15 minutes.",
+                    }],
                 },
                 {"type": "text", "text": "Your groceries are on the way."},
             ]
@@ -81,6 +85,36 @@ class AgentTimeoutTests(unittest.TestCase):
             )
 
         self.assertEqual(meta, {"order_placed": False})
+
+    def test_business_failure_is_not_treated_as_an_order(self):
+        agent = _fresh_agent()
+
+        blocks = [
+            {"type": "mcp_tool_use", "name": "checkout", "id": "checkout-1", "input": {}},
+            {
+                "type": "mcp_tool_result",
+                "tool_use_id": "checkout-1",
+                "is_error": False,
+                "content": [{
+                    "type": "text",
+                    "text": "Checkout failed: one or more stores could not place the order.",
+                }],
+            },
+        ]
+
+        with patch.object(agent, "save_order") as save:
+            placed = agent._save_live_order_if_any(blocks, "call-1", "user-1")
+
+        self.assertFalse(placed)
+        save.assert_not_called()
+
+    def test_unknown_empty_checkout_result_is_uncertain_not_success(self):
+        agent = _fresh_agent()
+        blocks = [
+            {"type": "mcp_tool_use", "name": "checkout", "id": "checkout-1", "input": {}},
+            {"type": "mcp_tool_result", "tool_use_id": "checkout-1", "is_error": False},
+        ]
+        assert agent._save_live_order_if_any(blocks, "call-1", "user-1") is False
 
     def test_process_message_default_returns_bare_string(self):
         agent = _fresh_agent()
@@ -232,9 +266,45 @@ class AgentTimeoutTests(unittest.TestCase):
         self.assertLess(captured["timeout"], agent._api_timeout_for("chat"))
         self.assertNotIn("speed", captured)
 
+    def test_final_checkout_turn_uses_a_longer_api_timeout(self):
+        agent = _fresh_agent()
+        captured = {}
+        history = [{
+            "role": "assistant",
+            "content": (
+                "Full cart is 217 rupees, delivered to Ghar address. "
+                "Payment is cash on delivery. Place the order?"
+            ),
+        }]
+
+        class FakeResponse:
+            content = [type("B", (), {"type": "text", "text": "not placed"})()]
+            stop_reason = "end_turn"
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return FakeResponse()
+
+        with (
+            patch.object(agent.client.beta.messages, "create", side_effect=fake_create),
+            patch.object(agent.swiggy_address, "maybe_background_refresh"),
+            patch.object(agent.swiggy_address, "get_cached_default", return_value=None),
+        ):
+            agent._run_agent_live("yes", history, "voice", "call-test", {"im": "token"})
+
+        self.assertEqual(captured["timeout"], agent.VOICE_CHECKOUT_API_TIMEOUT_SECS)
+        self.assertGreater(captured["timeout"], agent._api_timeout_for("voice"))
+
     def test_live_confirmed_checkout_failure_does_not_invite_retry(self):
         agent = _fresh_agent()
         tokens = {"im": "im-token"}
+        history = [{
+            "role": "assistant",
+            "content": (
+                "Your full cart is 217 rupees, delivered to Ghar. "
+                "Payment is cash on delivery. Place the order?"
+            ),
+        }]
 
         def fail_create(**kwargs):
             raise RuntimeError("network dropped after checkout")
@@ -245,11 +315,26 @@ class AgentTimeoutTests(unittest.TestCase):
             patch.object(agent.swiggy_address, "get_cached_default", return_value=None),
             patch.object(agent.logging, "exception"),
         ):
-            response, _ = agent._run_agent_live("yes", [], "voice", "call-test", tokens)
+            response, _ = agent._run_agent_live("yes", history, "voice", "call-test", tokens)
 
         self.assertIn("check your Swiggy app", response)
         self.assertIn("before trying again", response)
         self.assertNotIn("Please try again in a moment", response)
+
+    def test_failure_after_a_product_confirmation_is_not_called_checkout_uncertainty(self):
+        agent = _fresh_agent()
+        tokens = {"im": "im-token"}
+        history = [{"role": "assistant", "content": "Milk, 59 rupees. Add it?"}]
+
+        with (
+            patch.object(agent.client.beta.messages, "create", side_effect=RuntimeError("down")),
+            patch.object(agent.swiggy_address, "maybe_background_refresh"),
+            patch.object(agent.swiggy_address, "get_cached_default", return_value=None),
+            patch.object(agent.logging, "exception"),
+        ):
+            response, _ = agent._run_agent_live("yes", history, "voice", "call-test", tokens)
+
+        self.assertEqual(response, agent.LIVE_GENERIC_FAILURE_MESSAGE)
 
 
 if __name__ == "__main__":
@@ -291,40 +376,51 @@ def test_plain_string_content_passes_through():
     assert agent._text_after_last_tool("Done. Arriving in 12 minutes.") == "Done. Arriving in 12 minutes."
 
 
-def test_checkout_is_disabled_until_the_caller_confirms(monkeypatch):
-    """The spend gate is what stands between a demo and a real order.
-
-    checkout is only offered to the model when the caller's latest message
-    reads as a confirmation. Without that, an over-eager model cannot spend
-    money even if it decides to.
-    """
+def test_checkout_requires_the_final_cart_address_and_payment_confirmation():
+    """A generic "yes" may confirm a variant or address, not spending."""
     import agent
 
-    captured = {}
+    product_confirmation = [
+        {"role": "assistant", "content": "Milk, 59 rupees. Add it?"},
+    ]
+    final_confirmation = [
+        {
+            "role": "assistant",
+            "content": (
+                "Your full cart is 217 rupees, delivered to Ghar. "
+                "Payment is cash on delivery. Place the order?"
+            ),
+        },
+    ]
 
-    class FakeResponse:
-        stop_reason = "end_turn"
-        content = [type("B", (), {"type": "text", "text": "Milk, 59 rupees. Confirm?"})()]
+    assert agent._checkout_ready("yes", product_confirmation, "voice") is False
+    assert agent._checkout_ready("yes", final_confirmation, "voice") is True
+    assert agent._checkout_ready("get me milk", final_confirmation, "voice") is False
+    assert agent._checkout_ready("yes, but remove bread", final_confirmation, "voice") is False
+    assert agent._checkout_ready("haan, deliver to office instead", final_confirmation, "voice") is False
+    assert agent._checkout_ready("yes, add a coke too", final_confirmation, "voice") is False
 
-    def fake_create(surface, live, **kwargs):
-        captured["tools"] = kwargs.get("tools")
-        return FakeResponse()
 
-    monkeypatch.setattr(agent, "_create_message", fake_create)
-    monkeypatch.setattr(agent, "get_access_tokens", lambda keys, user_id=None: {"im": "tok"})
-    monkeypatch.setattr(agent.swiggy_address, "get_cached_default", lambda: {"id": "A1", "label": "Home", "area": ""})
-    monkeypatch.setattr(agent.swiggy_address, "maybe_background_refresh", lambda: None)
+def test_chat_checkout_accepts_a_named_upi_method_after_final_summary():
+    import agent
 
-    def spend_enabled_for(message):
-        agent.run_agent(message, [], surface="voice", session_id="s", user_id="u")
-        for tool in captured["tools"]:
-            configs = tool.get("configs") if isinstance(tool, dict) else None
-            if configs and "checkout" in configs:
-                return configs["checkout"]["enabled"]
-        raise AssertionError("checkout config not found")
+    history = [{
+        "role": "assistant",
+        "content": (
+            "Your full cart is 217 rupees, delivered to Ghar. "
+            "Payment is Google Pay UPI. Proceed?"
+        ),
+    }]
+    assert agent._checkout_ready("proceed", history, "chat") is True
 
-    assert spend_enabled_for("get me milk") is False
-    assert spend_enabled_for("haan") is True
+
+def test_internal_widget_tools_are_not_exposed_to_the_model():
+    import agent
+
+    configs = agent._mcp_tool_configs(checkout_enabled=False)
+    assert configs["checkout"] == {"enabled": False}
+    for internal in ("get_delivery_status", "check_payment_status", "confirm_order"):
+        assert configs[internal] == {"enabled": False}
 
 
 class FastConfirmTests(unittest.TestCase):
@@ -412,12 +508,25 @@ class FastConfirmTests(unittest.TestCase):
     def test_speaks_the_callers_words_not_the_catalogue_title(self):
         line = self._line({
             "added": [
-                {"item": "milk", "name": "Mother Dairy Pasteurised Homogenised Cow Milk"},
-                {"item": "bread", "name": "NOICE 5 Seed Multigrain Bread (Zero Maida)"},
+                {
+                    "item": "milk",
+                    "name": "Mother Dairy Pasteurised Homogenised Cow Milk",
+                    "brand": "Mother Dairy",
+                    "variant": "500 ml",
+                },
+                {
+                    "item": "bread",
+                    "name": "NOICE 5 Seed Multigrain Bread (Zero Maida)",
+                    "brand": "NOICE",
+                    "variant": "250 g",
+                },
             ],
             "not_found": [], "cart_updated": True, "subtotal": 79,
         })
-        self.assertEqual(line, "milk and bread, 79 rupees. Confirm?")
+        self.assertEqual(
+            line,
+            "Mother Dairy milk 500 ml and NOICE bread 250 g, 79 rupees. Confirm?",
+        )
         self.assertNotIn("Pasteurised", line)
 
     def test_multiple_quantities_fall_through_so_counts_are_not_understated(self):

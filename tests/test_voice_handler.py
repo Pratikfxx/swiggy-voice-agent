@@ -110,6 +110,47 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(timed_out)
         self.assertIn("taking a bit longer", agent_response)
 
+    async def test_checkout_confirmation_gets_the_longer_deadline(self):
+        voice_handler = _fresh_voice_handler()
+
+        def finishes_after_normal_deadline(*args, **kwargs):
+            time.sleep(0.10)
+            return ("Instamart order placed successfully.", {"order_placed": True})
+
+        with (
+            patch.object(voice_handler, "process_message", side_effect=finishes_after_normal_deadline),
+            patch.object(voice_handler, "checkout_confirmation_pending", return_value=True),
+            patch.object(voice_handler, "VOICE_AGENT_TIMEOUT_SECS", 0.05),
+            patch.object(voice_handler, "VOICE_CHECKOUT_TIMEOUT_SECS", 0.20),
+        ):
+            response, _, timed_out, meta = await voice_handler.run_voice_agent_with_deadline(
+                "checkout-call", "yes", return_meta=True
+            )
+
+        self.assertFalse(timed_out)
+        self.assertIn("placed successfully", response)
+        self.assertTrue(meta["order_placed"])
+
+    async def test_uncertain_checkout_never_tells_the_caller_to_try_again(self):
+        voice_handler = _fresh_voice_handler()
+
+        def too_slow(*args, **kwargs):
+            time.sleep(0.20)
+            return "late"
+
+        with (
+            patch.object(voice_handler, "process_message", side_effect=too_slow),
+            patch.object(voice_handler, "checkout_confirmation_pending", return_value=True),
+            patch.object(voice_handler, "VOICE_CHECKOUT_TIMEOUT_SECS", 0.05),
+        ):
+            response, _, timed_out, _ = await voice_handler.run_voice_agent_with_deadline(
+                "checkout-call", "yes", return_meta=True
+            )
+
+        self.assertTrue(timed_out)
+        self.assertIn("check your Swiggy app", response)
+        self.assertNotIn("try again", response.lower())
+
     async def test_voice_process_does_not_block_event_loop_during_slow_agent(self):
         voice_handler = _fresh_voice_handler()
 
@@ -231,6 +272,15 @@ class VoiceHandlerTests(unittest.IsolatedAsyncioTestCase):
             twiml = (await voice_handler.voice_result(FakeRequest(poll))).body.decode()
             self.assertNotIn("<Say", twiml)
             self.assertIn("<Redirect", twiml)
+
+    def test_long_checkout_wait_keeps_checking_in(self):
+        voice_handler = _fresh_voice_handler()
+        last_check_in = max(voice_handler._VOICE_WAIT_LINES)
+        self.assertGreaterEqual(
+            last_check_in,
+            voice_handler.VOICE_RESULT_MAX_POLLS - 8,
+            "a long checkout must not leave ~40 seconds of dead air",
+        )
 
     def test_voice_polling_budget_allows_live_search_to_finish_without_dead_air(self):
         voice_handler = _fresh_voice_handler()

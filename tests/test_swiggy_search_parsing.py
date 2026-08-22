@@ -181,6 +181,64 @@ def test_unavailable_pack_size_falls_back_to_cheapest():
     assert swiggy_search._top_match("99 pack of diet coke", result, 99)["skuId"] == "ONE"
 
 
+def _product(name, sku):
+    return {
+        "displayName": name,
+        "variations": [{
+            "skuId": sku,
+            "spinId": "SP" + sku,
+            "displayName": name,
+            "quantityDescription": "350 ml",
+            "price": {"offerPrice": 100},
+            "isInStockAndAvailable": True,
+        }],
+    }
+
+
+def test_exact_single_product_beats_a_combo_ranked_first():
+    products = [
+        _product("Monster Energy Ultra Zero Sugar, Coca-Cola Zero Combo", "COMBO"),
+        _product("Monster Energy Ultra Zero Sugar", "SINGLE"),
+    ]
+    result = _result(PROSE, json.dumps({"products": products}))
+    assert swiggy_search._top_match("monster energy zero", result)["skuId"] == "SINGLE"
+
+
+def test_a_relevant_product_beats_an_unrelated_first_result():
+    products = [
+        _product("Supreme Harvest Cassia Taj Roll", "CASSIA"),
+        _product("Organic Cinnamon Whole", "CINNAMON"),
+    ]
+    result = _result(PROSE, json.dumps({"products": products}))
+    assert swiggy_search._top_match("cinnamon", result)["skuId"] == "CINNAMON"
+
+
+def test_equal_relevance_preserves_swiggys_ranking():
+    products = [_product("NOICE Multigrain Bread", "FIRST"), _product("White Bread", "SECOND")]
+    result = _result(PROSE, json.dumps({"products": products}))
+    assert swiggy_search._top_match("bread", result)["skuId"] == "FIRST"
+
+
+def test_unavailable_best_match_does_not_corrupt_the_fallback_order():
+    unavailable_combo = _product(
+        "Monster Energy Ultra Zero Sugar, Coca-Cola Zero Combo", "COMBO"
+    )
+    unavailable_combo["variations"][0]["isInStockAndAvailable"] = False
+    exact_single = _product("Monster Energy Ultra Zero Sugar", "SINGLE")
+    mango = _product("Monster Ultra Fiesta Mango Energy Drink Zero Sugar", "MANGO")
+    result = _result(
+        PROSE,
+        json.dumps({"products": [unavailable_combo, mango, exact_single]}),
+    )
+    assert swiggy_search._top_match("monster energy zero", result)["skuId"] == "SINGLE"
+
+
+def test_query_word_does_not_match_inside_an_unrelated_word():
+    products = [_product("Toilet Cleaner", "TOILET"), _product("Sunflower Oil", "OIL")]
+    result = _result(PROSE, json.dumps({"products": products}))
+    assert swiggy_search._top_match("oil", result)["skuId"] == "OIL"
+
+
 def test_keep_list_matches_the_right_lines():
     """Dropping by "sugar" also removed "Monster Energy Zero Sugar", which is
     why the tool prefers naming what to keep."""

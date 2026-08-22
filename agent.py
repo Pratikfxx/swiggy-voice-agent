@@ -61,6 +61,9 @@ VOICE_THINKING = os.getenv("VOICE_THINKING", "disabled")
 # server-side MCP connector, so every search/lookup round trip happens inside a
 # single create() call. A measured live turn is ~6s, so keep real headroom here.
 VOICE_API_TIMEOUT_SECS = float(os.getenv("VOICE_API_TIMEOUT_SECS", "20.0"))
+VOICE_CHECKOUT_API_TIMEOUT_SECS = float(
+    os.getenv("VOICE_CHECKOUT_API_TIMEOUT_SECS", "55.0")
+)
 CHAT_API_TIMEOUT_SECS = float(os.getenv("CHAT_API_TIMEOUT_SECS", "30.0"))
 CHAT_MAX_TOKENS = int(os.getenv("CHAT_MAX_TOKENS", "1024"))
 # When the primary model is overloaded/rate-limited (429/5xx), retry the same
@@ -73,8 +76,8 @@ CHAT_OVERLOAD_FALLBACK = os.getenv("CHAT_OVERLOAD_FALLBACK", "claude-haiku-4-5")
 # round trip — measured at 4.4s of a 13.2s turn to emit 26 tokens whose shape
 # the voice prompt already dictates and whose contents the cart tool already
 # returned. When enabled, voice turns say that line directly and skip the call.
-# Off by default: it bypasses the model's judgement, so it must be judged by
-# ear on a real call before it becomes the default.
+# Enabled by default after live A/B testing; disable without a deploy if a
+# response needs the model's judgement.
 VOICE_FAST_CONFIRM = os.getenv("VOICE_FAST_CONFIRM", "true").lower() == "true"
 
 DEMO_MODE = demo_mode()
@@ -92,13 +95,7 @@ SPEND_TOOLS = {
     "swiggy-dineout": ["book_table"],
 }
 ORDER_PLACEMENT_RULES = (
-    "\n\nPLACING THE ORDER: checkout REJECTS any call without a payment "
-    "method, which is why orders were silently never being placed. The UPI "
-    "options need the caller to finish payment in an app on their phone, so "
-    "they cannot be completed during a call. Use cash on delivery: call "
-    "checkout with paymentMethod=\"Cash\". Say which payment you are using in "
-    "the confirmation line — \"cash on delivery\" — so the caller is never "
-    "surprised at the door.\n"
+    "\n\nPLACING THE ORDER:\n"
     "NEVER say an order is placed, and never give an order number or an "
     "arrival time, unless a checkout tool call in THIS turn returned success. "
     "If checkout failed or you did not call it, say plainly that the order did "
@@ -112,9 +109,6 @@ ORDER_PLACEMENT_RULES = (
     "this. If the cart holds anything the caller has not asked for in this "
     "call, name those items and ask whether to keep or drop them before "
     "placing the order.\n"
-    "Cash on delivery is Swiggy's own documented path for this: no payment "
-    "picker is needed, but the caller must explicitly agree to pay by cash "
-    "before checkout is called.\n"
     "When checkout succeeds, use the message from the tool response as it is "
     "written — Swiggy requires the wording \"Instamart order placed "
     "successfully\" rather than a plain \"order placed\". Then close warmly: "
@@ -123,6 +117,19 @@ ORDER_PLACEMENT_RULES = (
     "already been placed, do NOT call any tool — no tool can do it. Tell them "
     "to call Swiggy customer care on 080 67466729. Removing items from the "
     "cart is different and is still handled by remove_from_cart."
+)
+
+VOICE_PAYMENT_RULES = (
+    "\nVOICE PAYMENT: UPI needs an app or QR surface outside this phone call. "
+    "Use cash on delivery: explicitly ask the caller to pay by cash, then only "
+    "after they agree call checkout with paymentMethod=\"Cash\"."
+)
+
+CHAT_PAYMENT_RULES = (
+    "\nCHAT PAYMENT: when the user is ready to pay, call get_payment_options. "
+    "Let them choose a live UPI app, QR, or cash option; never force cash. Echo "
+    "the selected UPI method id byte-for-byte into checkout, or use "
+    "paymentMethod=\"Cash\" only when they explicitly choose cash."
 )
 
 CART_EDIT_RULES = (
@@ -146,9 +153,12 @@ ADDRESS_SELECTION_RULES = (
     "addressLine matches what they said, take its `id`, and use THAT id as the "
     "addressId for EVERY subsequent search_products, update_cart and checkout "
     "call — all tools in one order must use the same chosen addressId, never a "
-    "mix. get_addresses returns only the 10 most recently used addresses and "
-    "takes no page argument, so if there is no match, say which saved addresses "
-    "you can see, name two or three of them, and ask which one they mean. Never "
+    "mix. get_addresses returns 10 addresses per page. If the named address is "
+    "not on page 1 and the response says there are more pages, call it again "
+    "with page=2, then page=3, until you find the match or exhaust the pages. "
+    "The server accepts page even though its published input schema is empty. "
+    "If no page matches, name two or three saved addresses and ask which one "
+    "they mean. Never "
     "silently fall back to the default address when the user asked for a "
     "different one."
 )
@@ -180,6 +190,10 @@ def _route_servers(user_message: str, surface: str) -> list[str]:
 
 def _is_confirmation(text):
     return bool(CONFIRM_RE.search(text or ""))
+
+
+def _payment_rules_for_surface(surface: str) -> str:
+    return VOICE_PAYMENT_RULES if surface == "voice" else CHAT_PAYMENT_RULES
 
 
 def normalize_user_id(identity: str) -> str:
@@ -461,7 +475,7 @@ TOOLS = [
 
 LIVE_LOCAL_TOOLS = [
     tool for tool in TOOLS
-    if tool["name"] in {"get_recipe_ingredients", "get_order_history", "search_and_add_to_cart", "remove_from_cart"}
+    if tool["name"] in {"get_recipe_ingredients", "search_and_add_to_cart", "remove_from_cart"}
 ]
 LOCAL_NAMES = {tool["name"] for tool in LIVE_LOCAL_TOOLS}
 
@@ -624,10 +638,12 @@ VOICE RULES — NON-NEGOTIABLE:
 
 ORDER FLOW:
 1. User says what they want → search Instamart → give ONE strong top result or a small cart.
-2. Confirm with one natural sentence → wait for yes/no.
-3. On yes → checkout → say done in one sentence → hang up.
-- Always use saved address. Never ask for it.
-- Only place after: yes, haan, okay, confirm, theek hai.
+2. Let the user accept or edit those selections.
+3. Before spending, give the final cart, address, and payment summary in one
+   short question. Only a yes to this final summary enables checkout.
+4. After checkout succeeds, say done in one sentence and hang up.
+- Use the verified default address unless the user names another saved address.
+- A yes to a product, variant, cart edit, or address is not permission to place.
 - MULTIPLE items or a recipe: call search_and_add_to_cart ONCE with EVERY item
   (and the addressId). It searches AND fills the cart in one step — never search
   items one at a time, and do NOT call update_cart yourself afterward.
@@ -641,8 +657,9 @@ ORDER FLOW:
   ask "should I get paneer or the milk to make it" or similar; just buy it.
 
 CONFIRMATION:
-- Grocery: "[Main items], [total] rupees, [ETA] on Instamart. Confirm?"
-- Recipe cart: "[Main ingredients], [total] rupees. Order them?"
+- Selection: "[Brand/item and pack], [cart total] rupees. Keep these?"
+- Final spend: "Full cart is [total] rupees, delivered to [address], cash on
+  delivery. Place the order?"
 - If there are more than 3 grocery items, summarize the count and name the most important 2-3 items.
 - Do not read individual prices unless the user asks.
 
@@ -654,7 +671,8 @@ CANCELLING A PLACED ORDER: no tool can cancel one. Say: "I can't cancel it from
 here, but Swiggy customer care can, on 080 67466729."
 
 REPEAT ORDER:
-- "order my usual" / "phir se" → call get_order_history → repeat only Instamart orders. If the last order was not Instamart, ask what grocery or essential they want instead.
+- "order my usual" / "phir se" → use the available history tool: get_orders in
+  live mode, get_order_history in demo mode. Repeat only Instamart orders.
 
 LANGUAGE: Match whatever the user speaks — Hindi, Hinglish, English all fine.
 """
@@ -672,7 +690,8 @@ Help users order Instamart groceries, snacks, drinks, household essentials, pers
 ## Chat response rules
 - Use markdown formatting (bold, tables, bullet points)
 - Show a focused Instamart cart as a table with item, qty, price, and ETA when available
-- Always confirm before placing order: "Ready to place? Reply **yes** to confirm."
+- Before placing, show the full cart total, delivery address, and selected live
+  payment method, then ask: "Ready to place? Reply **yes** to confirm."
 - After confirmation → place order → send confirmation with order ID
 
 ## Intent detection
@@ -683,7 +702,8 @@ Help users order Instamart groceries, snacks, drinks, household essentials, pers
 
 ## Repeat orders
 - Triggers: "order my usual", "same as last time", "repeat my order", "what did I order last", "order again"
-- Call get_order_history to look up past orders.
+- Use the available history tool: get_orders in live mode, get_order_history in
+  demo mode.
 - If Instamart orders exist: show a summary of the last 1–3 Instamart orders and ask which one to repeat (or confirm the latest).
 - If no history: say so and ask what they'd like instead.
 - On confirmation, re-place the exact same Instamart order.
@@ -706,11 +726,19 @@ _LIVE_SYSTEM_SUFFIX_BASE = """
 ## LIVE Swiggy mode
 You now have LIVE Swiggy Instamart tools. These tools use the user's real Swiggy account and can spend real money.
 
-Hard safety rule: NEVER call checkout unless the user has EXPLICITLY confirmed in their most recent message (yes/haan/confirm/etc). If they have not confirmed, summarize and ask for confirmation instead.
+Hard safety rule: before checkout, state the full cart total, delivery address,
+and payment method in one final summary. Ask whether to place the order. Only a
+confirmation to THAT summary authorizes checkout; a "yes" to a product or
+address question does not.
 
 When fetching addresses, default to the address tagged Home or the most recently used; confirm the delivery address in one short line before placing.
 
-ADDRESS & SPEED RULES: Do NOT call get_addresses just to search - searching for food or products needs no address, so search immediately. Only resolve a delivery address when actually placing an order, and then default to the user's Home address (or most recently used) automatically. NEVER ask the user to choose an address unless they explicitly bring it up. On voice especially, keep it to one short question max before proposing an item.
+ADDRESS & SPEED RULES: search_products requires a real addressId. Use the
+verified default addressId injected below for ordinary searches. If none was
+injected, call get_addresses first. If the user names another saved address,
+follow the pagination and matching rules below. Before checkout, always state
+the selected delivery address as part of the final confirmation. On voice,
+keep that confirmation to one short question.
 """
 
 LIVE_SYSTEM_SUFFIX = _LIVE_SYSTEM_SUFFIX_BASE + CART_EDIT_RULES + ORDER_PLACEMENT_RULES
@@ -733,6 +761,57 @@ def _content_text(content) -> str:
         if text:
             text_blocks.append(text)
     return " ".join(text_blocks).strip()
+
+
+_PAYMENT_TERMS = re.compile(
+    r"\b(cash on delivery|pay by cash|upi|gpay|google pay|phonepe|paytm|bhim|"
+    r"cred|scan[- ]?qr|super\.money)\b",
+    re.I,
+)
+_ORDER_CHANGE_RE = re.compile(
+    r"\b(but|add|remove|drop|change|instead|without|except|cancel|address|"
+    r"office|home|workplace)\b",
+    re.I,
+)
+
+
+def _checkout_ready(user_message: str, history: list[dict], surface: str) -> bool:
+    """True only after the required final order summary was confirmed."""
+    if not _is_confirmation(user_message):
+        return False
+    if _ORDER_CHANGE_RE.search(user_message or ""):
+        return False
+
+    previous = ""
+    for message in reversed(history):
+        if message.get("role") == "assistant":
+            previous = _content_text(message.get("content"))
+            break
+
+    lowered = previous.lower()
+    has_total = bool(re.search(r"(?:₹|\b\d+(?:\.\d+)?\s+rupees?\b)", previous, re.I))
+    has_address = any(term in lowered for term in ("deliver to", "delivered to", "delivery to", "address"))
+    has_payment = bool(_PAYMENT_TERMS.search(previous))
+    asks_to_place = any(term in lowered for term in ("place the order", "proceed", "confirm"))
+    if surface == "voice":
+        has_payment = "cash on delivery" in lowered or "pay by cash" in lowered
+    return has_total and has_address and has_payment and asks_to_place
+
+
+def checkout_confirmation_pending(
+    session_id: str, user_message: str, surface: str = "voice"
+) -> bool:
+    return _checkout_ready(user_message, get_session(session_id), surface)
+
+
+def _mcp_tool_configs(checkout_enabled: bool) -> dict[str, dict[str, bool]]:
+    """Model-facing gates; widget-owned payment tools stay server-owned."""
+    return {
+        "checkout": {"enabled": checkout_enabled},
+        "get_delivery_status": {"enabled": False},
+        "check_payment_status": {"enabled": False},
+        "confirm_order": {"enabled": False},
+    }
 
 
 def _text_after_last_tool(content) -> str:
@@ -794,7 +873,16 @@ def _fast_confirm_line(tool_name: str, raw_result: str, user_message: str) -> st
     # "item" is what the caller asked for ("milk"); "name" is the full
     # catalogue title ("Mother Dairy Pasteurised Homogenised Cow Milk"), which
     # is unbearable read aloud. Prefer the caller's own words.
-    names = [str(entry.get("item") or entry.get("name") or "").strip() for entry in added]
+    names = []
+    for entry in added:
+        item = str(entry.get("item") or entry.get("name") or "").strip()
+        brand = str(entry.get("brand") or "").strip()
+        variant = str(entry.get("variant") or "").strip()
+        if brand and brand.lower() not in item.lower():
+            item = f"{brand} {item}"
+        if variant:
+            item = f"{item} {variant}"
+        names.append(item)
     names = [n for n in names if n]
     if not names:
         return ""
@@ -821,6 +909,20 @@ def _spend_server_for_tool(tool_name: str) -> str:
         if tool_name in tool_names:
             return server_name
     return ""
+
+
+def _spend_result_succeeded(tool_name: str, result_block) -> bool:
+    """Business success, not merely a successful MCP transport call."""
+    if _block_value(result_block, "is_error", False):
+        return False
+    text = _content_text(_block_value(result_block, "content", "")).lower()
+    if tool_name == "checkout":
+        return (
+            "instamart order placed successfully" in text
+            or bool(re.search(r'"status"\s*:\s*"placed"', text))
+            or bool(re.search(r'"success"\s*:\s*true', text))
+        )
+    return bool(text)
 
 
 def _agent_result(response_text, messages, order_placed=False, return_meta=False):
@@ -1054,7 +1156,9 @@ def _save_live_order_if_any(
         elif block_type == "mcp_tool_result":
             tool_use_id = _block_value(block, "tool_use_id")
             tool_use = pending_spend_tools.get(tool_use_id) or last_pending_spend_tool
-            if not tool_use or _block_value(block, "is_error", False):
+            if not tool_use or not _spend_result_succeeded(
+                _block_value(tool_use, "name", ""), block
+            ):
                 continue
 
             try:
@@ -1141,11 +1245,12 @@ def _run_agent_live(
     messages = conversation_history + [{"role": "user", "content": user_message}]
     order_placed = False
     user_id = user_id or session_id
+    checkout_enabled = _checkout_ready(user_message, conversation_history, surface)
 
     try:
         system_prompt = (
             VOICE_SYSTEM_PROMPT if surface == "voice" else CHAT_SYSTEM_PROMPT
-        ) + LIVE_SYSTEM_SUFFIX
+        ) + LIVE_SYSTEM_SUFFIX + _payment_rules_for_surface(surface)
         default_address = swiggy_address.get_cached_default()
         if default_address:
             # warm cache: refresh in the background if the TTL lapsed
@@ -1170,11 +1275,10 @@ def _run_agent_live(
                 f"\n\nDEFAULT DELIVERY ADDRESS: {addr_label} ({addr_area}), "
                 f"addressId {addr_id}. Use this addressId by default for "
                 "search_products, update_cart (as selectedAddressId), and checkout. "
-                "Do not call get_addresses merely to start searching — searching "
-                "needs no address lookup.\n"
+                "Do not call get_addresses merely to start searching because this "
+                "verified default addressId is already available.\n"
                 + ADDRESS_SELECTION_RULES
             )
-        confirmed = _is_confirmation(user_message)
         active = _route_servers(user_message, surface)
         mcp_servers = [
             {
@@ -1191,10 +1295,7 @@ def _run_agent_live(
                 "type": "mcp_toolset",
                 "mcp_server_name": name,
                 "default_config": {"enabled": True},
-                "configs": {
-                    tool: {"enabled": confirmed}
-                    for tool in SPEND_TOOLS[name]
-                },
+                "configs": _mcp_tool_configs(checkout_enabled),
             }
             for name in active
         ]
@@ -1211,7 +1312,11 @@ def _run_agent_live(
                 mcp_servers=mcp_servers,
                 betas=["mcp-client-2025-11-20"],
                 messages=_with_history_breakpoint(messages),
-                timeout=_api_timeout_for(surface),
+                timeout=(
+                    VOICE_CHECKOUT_API_TIMEOUT_SECS
+                    if checkout_enabled and surface == "voice"
+                    else _api_timeout_for(surface)
+                ),
             )
             messages.append({"role": "assistant", "content": response.content})
 
@@ -1276,7 +1381,7 @@ def _run_agent_live(
 
     except Exception:
         logging.exception("Swiggy live agent failed")
-        if _is_confirmation(user_message):
+        if checkout_enabled:
             return _agent_result(
                 LIVE_CHECKOUT_UNCERTAIN_MESSAGE, messages, order_placed, return_meta
             )
