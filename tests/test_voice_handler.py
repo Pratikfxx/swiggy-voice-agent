@@ -413,3 +413,25 @@ class CleanForVoiceTests(unittest.TestCase):
     def test_no_space_left_before_punctuation(self):
         clean = self.voice_handler.clean_for_voice("Amul Taaza — 59 rupees — done.")
         self.assertNotIn(" ,", clean)
+
+
+class FarewellTests(unittest.TestCase):
+    """"Cancel my last order" used to match the bare word "cancel" and hang up
+    on the caller, so Swiggy's cancellation guidance never got a chance to
+    run."""
+
+    def setUp(self):
+        self.voice_handler = _fresh_voice_handler()
+
+    def test_a_bare_cancel_still_ends_the_call(self):
+        for spoken in ("cancel", "stop", "  cancel.", "bye", "hang up", "band karo"):
+            self.assertTrue(self.voice_handler.is_farewell(spoken), spoken)
+
+    def test_cancelling_an_order_is_not_a_farewell(self):
+        for spoken in (
+            "cancel my last order",
+            "I want to cancel the order I just placed",
+            "cancel that item",
+            "stop the order",
+        ):
+            self.assertFalse(self.voice_handler.is_farewell(spoken), spoken)

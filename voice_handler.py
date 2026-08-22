@@ -32,7 +32,14 @@ from order_history import get_recent_orders
 from twilio_security import verify_twilio_request
 
 
-_FAREWELL_RE = re.compile(r"\b(bye|goodbye|good bye|cancel|hang up|end call|band karo|band kar do|stop)\b", re.I)
+# Unambiguous ways to end a call.
+_FAREWELL_RE = re.compile(
+    r"\b(bye|goodbye|good bye|hang up|end call|band karo|band kar do)\b", re.I
+)
+# "cancel" and "stop" end the call only when said alone. "Cancel my last order"
+# is a request about an order, and matching the bare word hung up on the caller
+# instead of giving them Swiggy's cancellation line.
+_SHORT_FAREWELL_RE = re.compile(r"^\W*(cancel|stop)\W*$", re.I)
 _VOICE_ITEM_COMMAND_RE = re.compile(
     r"\b(get|bring|add|order|need|want|me|please|some|a|an|the|from|on|swiggy|instamart|grocery|groceries|items?)\b",
     re.I,
@@ -635,7 +642,8 @@ async def prewarm_tts() -> None:
 
 def is_farewell(text: str) -> bool:
     """Detect if user wants to end the call."""
-    return bool(_FAREWELL_RE.search(text or ""))
+    spoken = (text or "").strip()
+    return bool(_FAREWELL_RE.search(spoken) or _SHORT_FAREWELL_RE.match(spoken))
 
 
 def is_order_complete(response_text: str) -> bool:
