@@ -142,3 +142,15 @@ class OrderPlacementPromptTests(unittest.TestCase):
         agent = _fresh_agent()
         self.assertIn("BEFORE checkout", agent.ORDER_PLACEMENT_RULES)
         self.assertIn("cart_total", agent.ORDER_PLACEMENT_RULES)
+
+    def test_cancellation_routes_to_customer_care_not_a_tool(self):
+        """Swiggy's checkout contract states plainly: no tool can cancel an
+        order, and the caller must be given the customer care number."""
+        agent = _fresh_agent()
+        for text in (agent.ORDER_PLACEMENT_RULES, agent.VOICE_SYSTEM_PROMPT):
+            self.assertIn("080 67466729", text)
+        self.assertIn("do NOT call any tool", agent.ORDER_PLACEMENT_RULES)
+
+    def test_success_wording_follows_swiggy_branding(self):
+        agent = _fresh_agent()
+        self.assertIn("Instamart order placed successfully", agent.VOICE_SYSTEM_PROMPT)
